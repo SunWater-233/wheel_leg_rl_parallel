@@ -4,26 +4,80 @@ friction = 0.8
 forward_command = [-0.5, 0.5] # m/s
 yaw_command = [-0.5, 0.5] # rad/s
 
-# Multipliers for the reward terms.
-[task.reward]
-speed = 1.0
-steady_speed = 0.0 # locomotion cost for sustained straight-line speed error
-yaw = 1.0
-upright = 1.0
-height = 1.0
-flat_pitch = 0.0 # legacy locomotion snapshots
-leg_alignment = 0.0 # legacy locomotion snapshots
-braking_pitch = 0.0 # locomotion cost for excessive pitch and pitch rate during braking
-braking_recovery_pitch = 0.0 # locomotion cost for pitch after a flat-ground stop command reaches zero
-braking_yaw = 0.0 # yaw-rate error during flat straight-line braking and recovery
-acceleration_pitch = 0.0 # flat-ground chassis stabilization during a forward-speed ramp
-settled_motion = 0.0 # legacy locomotion snapshots
-height_transition = 0.0 # flat-ground roll and leg motion cost during height changes and settling
-wheel_support = 1.0
-vertical_velocity = 1.0
-angular_velocity = 1.0
-action_rate = 1.0
-fall = 1.0
+# Defaults for the SCUT V14 Rough-v1 reward used by Genesis.
+[task.scut_rough_reward.tracking]
+forward_deadband = 0.1 # m/s
+yaw_deadband = 0.1 # rad/s
+forward_reward_weight = 1.25
+forward_error_clip = 1.0 # m/s, for the exponential term
+forward_error_width = 0.5 # denominator of the exponential term
+forward_error_scale = 0.25 # applied to the error before squaring
+yaw_reward_weight = 1.0
+yaw_error_clip = 0.8 # rad/s, for the exponential term
+yaw_error_width = 0.25
+yaw_error_scale = 0.5
+standing_drift_weight = 1.0 # horizontal speed penalty at zero forward command
+pitch_reward_weight = 1.0 # exponential reward on projected gravity X
+pitch_width = 0.02
+roll_reward_weight = 1.0 # exponential reward on projected gravity Y
+roll_width = 0.01
+tilt_base_scale = 2.0 # base error scale before squaring
+tilt_low_speed_scale = 2.0 # additional error scale near zero forward command
+tilt_speed_width = 3.0 # denominator of the speed-dependent exponential
+pitch_penalty_weight = 2.0 # quadratic pitch penalty outside the airborne phase
+roll_penalty_weight = 2.0 # quadratic roll penalty on the ground and in the air
+height_reward_weight = 1.0
+height_error_clip = 0.15 # m, for the exponential term
+height_error_width = 0.001
+height_error_scale = 10.0 # applied before squaring, outside the airborne phase
+
+[task.scut_rough_reward.motion]
+action_delta_weight = 0.002 # first difference of all policy actions
+leg_action_curvature_weight = 0.005 # second difference of leg actions
+wheel_action_curvature_weight = 0.001 # second difference of wheel actions
+leg_acceleration_weight = 1e-7
+wheel_acceleration_weight = 2e-9
+leg_velocity_weight = 1e-3
+wheel_velocity_weight = 2e-6
+wheel_gap_threshold = 0.05 # m, fore-aft wheel-center separation in the body frame
+wheel_gap_threshold_weight = 1.0 # fixed penalty when the wheel gap exceeds the threshold
+wheel_gap_scale = 5.0 # 1/m, applied before squaring
+
+[task.scut_rough_reward.regularization]
+torque_weight = 1e-5 # squared actuator torque
+wheel_power_weight = 1e-5 # positive mechanical wheel power
+vertical_velocity_weight = 0.5
+body_angular_velocity_weight = 0.05 # roll and pitch rates
+nonwheel_contact_force_threshold = 3.0 # N
+nonwheel_contact_weight = 2.0
+airborne_nonwheel_contact_extra_weight = 48.0
+fall_weight = 200.0
+airborne_fall_extra_weight = 1000.0
+
+[task.scut_rough_reward.airborne]
+body_clearance_scan_radius = 0.01 # m, half-width of the 3-by-3 ground-height sample grid
+knee_margin_fraction = 0.03 # soft-limit margin at each end of the knee travel
+body_clearance_margin = 0.08 # m above the minimum stance clearance to detect liftoff
+wheel_clearance_threshold = 0.08 # m from each tire to the ground to detect liftoff
+liftoff_wheel_force_threshold = 1.0 # N, both wheels must be below this force
+landing_wheel_force_threshold = 20.0 # N to count a wheel contact
+landing_wheel_center_height = 0.15 # m, wheel-center height limit for counting contact
+body_contact_force_threshold = 5.0 # N to count contact of a body link
+wheel_contact_end_seconds = 0.30 # sustained wheel contact that ends the airborne phase
+body_contact_end_seconds = 0.25 # sustained body contact that ends the airborne phase
+max_airborne_seconds = 1.0
+wheel_contact_transition_seconds = 0.02 # boundary between pre-contact and landing rewards
+post_contact_end_seconds = 0.05 # end of the landing wheel-speed penalty window
+body_contact_centering_seconds = 0.02 # body contact limit for the centering reward
+wheel_torque_scale = 1.5 # N·m, divisor in the low-torque exponential reward
+progress_speed_threshold = 1.0 # m/s, both commanded and measured speed
+wheel_speed_scale = 10.0 # rad/s, wheel speed corresponding to full progress
+centering_width = 0.02 # denominator of the wheel-centering exponential
+low_torque_reward_weight = 20.0
+wheel_progress_reward_weight = 10.0
+landing_wheel_progress_penalty_weight = 10.0
+centering_reward_weight = 10.0
+knee_overrun_weight = 10.0
 
 [task.domain_randomization]
 enabled = false
@@ -58,10 +112,8 @@ joint_velocity = 0.0 # rad/s, before observation scaling
 
 [task.locomotion]
 enabled = false
-reward_profile = "v02"
 leg_torque_limit = 12.0 # N·m per active leg joint
 height_range = [0.17, 0.20] # hip-to-wheel vertical projection, m
-body_height_tracking = false # track base_link clearance above local ground instead of hip-to-wheel height
 height_lowering_schedule = [] # [PPO iteration, minimum sampled leg height in m]
 height_nominal = 0.20
 height_max_probability = 0.0 # probability of sampling height_range's upper endpoint
@@ -72,6 +124,7 @@ speed_maneuvers = false
 braking_maneuvers = false
 launch_maneuvers = false # repeated start, cruise and stop at a fixed leg height
 height_maneuvers = false # reserve flat-ground episodes for height changes at rest or at constant speed
+stationary_episode_fraction = 0.0 # fraction of flat-ground episodes with fixed height and zero motion commands
 launch_press_seconds = [] # optional total press durations, including the speed ramp
 launch_stop_seconds = [] # optional time held at zero command after the braking ramp
 speed_maneuver_weights = [] # random, straight, spin, slalom, optional corner brake, launch, and height changes
@@ -86,22 +139,6 @@ cliff_drop_heights = [] # m; three forward-drop heights for scut_v1
 slope_degrees = [3.0, 6.0]
 roughness = 0.005 # m
 obstacle_height = [0.005, 0.010] # m
-
-# Shared by the V0.2 locomotion stages. Motion penalties follow SCUT V14 Rough-v1.
-[task.locomotion.stability]
-enabled = true
-flat_pitch = 1.50
-settled_motion = 1.0
-no_fork_distance = 0.05 # forward wheel-center gap in body frame, m
-no_fork = 1.0
-no_fork_square_scale = 5.0 # 1/m
-action_rate = 0.002
-action_smoothness_leg = 0.005
-action_smoothness_wheel = 0.001
-leg_joint_acc = 1e-7
-wheel_acc = 2e-9
-leg_joint_vel = 1e-3
-wheel_vel = 2e-6
 
 [ppo]
 num_steps_per_env = 24

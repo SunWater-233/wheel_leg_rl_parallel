@@ -1,6 +1,6 @@
 # 自研轮腿 V0.2 · Genesis 训练
 
-默认加载自研模型的 [wheel_leg_ground.xml](assets/wheel_leg_xml_V0.2/wheel_leg_ground.xml)。共享的平地任务沿用华南理工 Wheelbipe 的观测、奖励、跌倒判定和超时重置逻辑。V0.2 按 CAD 原件导入质量、惯量、关节限位和 6 处闭链，每处闭链由一对 `connect` 约束实现。训练以 500 Hz 步进物理、50 Hz 更新控制。
+默认加载自研模型的 [wheel_leg_ground.xml](assets/wheel_leg_xml_V0.2/wheel_leg_ground.xml)。训练统一使用 [华南虎 V14 Rough-v1 reward 的 Genesis 移植](robots/scut_rough_reward.py)。连续腿高任务使用完整的 reward，固定高度平地任务使用其中的地面项。V0.2 按 CAD 原件导入质量、惯量、关节限位和 6 处闭链，每处闭链由一对 `connect` 约束实现。训练以 500 Hz 步进物理、50 Hz 更新控制。
 
 V0.2 的站立复位姿态让双轮轴位于重心下方。动作依次控制 `hip_L`、`hip_R`、`hipknee_L`、`hipknee_R` 的位置和 `wheel_L`、`wheel_R` 的转速，右侧镜像轴的符号由环境处理。膝关节由连杆驱动，气弹簧沿原模型轴施加 200 N，四个腿部驱动默认沿用原模型的 ±12 N·m 限幅。连续腿高任务可用 `task.locomotion.leg_torque_limit` 调整单关节限矩。轮端限矩 ±5 N·m、PD 参数和被动关节阻尼是仿真假设。
 
@@ -34,6 +34,8 @@ uv run --locked main.py demo --num-envs 4 --seconds 5 --video outputs/wheel_leg_
 
 以下命令在 `training` 下运行。新任务从空白权重起步，腿部限矩为 ±40 N·m。闭链姿态用髋关节中心到轮轴中心的垂向距离换算，奖励跟踪车身参考点的离地高度。`v02_low` 先在 33 cm 腿高低速训练，前 80 个 PPO 迭代保持 33 cm。之后把采样下限逐步降到第 160 轮的 30 cm、第 280 轮的 25 cm、第 450 轮的 20 cm，以及第 600 轮的 17 cm。新目标仍可采到较高腿位，回合内按腿高变化率连续过渡。恢复训练时沿用 checkpoint 的迭代编号。
 
+`v02_low` 有 45% 的驻车回合，保持初始腿高和零运动指令。回放验收时测零指令下的轮速和车身漂移。
+
 ```powershell
 uv sync --locked
 uv run --locked main.py train --config configs/v02_low.toml --num-envs 128 --iterations 30 --output outputs/v02_low_check
@@ -46,7 +48,7 @@ uv run --locked main.py train --config configs/v02_low.toml --num-envs 1024 --it
 uv run --locked main.py demo --checkpoint outputs/v02_low/model_999.pt --num-envs 1 --speed 0.35 --height-sequence 0.33 0.25 0.20 0.17 --height-hold 2
 ```
 
-TensorBoard 记录 `Episode/body_height_mae_cm`、`Episode/forward_mae_m_s`、`Episode/fall_rate` 和 `Episode/leg_saturation_rate`。确认低腿位站稳、启停及高度切换后，再逐步提高平地速度，每次从上一档通过验证的权重初始化。`--init-checkpoint` 加载相同观测结构的权重，并重新初始化优化器。老平地权重使用原来的回放入口。
+TensorBoard 记录 `Episode/body_height_mae_cm`、`Episode/forward_mae_m_s`、`Episode/fall_rate` 和 `Episode/leg_saturation_rate`。确认低腿位站稳、启停及高度切换后，再逐步提高平地速度，每次从上一档通过验证的权重初始化。`--init-checkpoint` 加载相同观测结构的权重，并重新初始化优化器。
 
 ```powershell
 uv run --locked main.py train --config configs/v02_speed.toml --init-checkpoint outputs/v02_low/model_999.pt --forward-limit 1.0 --num-envs 1024 --iterations 600 --output outputs/v02_speed_1
@@ -54,11 +56,11 @@ uv run --locked main.py train --config configs/v02_rough.toml --init-checkpoint 
 uv run --locked main.py demo --checkpoint outputs/v02_rough/model_999.pt --surface bars --terrain-seed 101 --num-envs 1 --seconds 10 --speed 0.35 --height-sequence 0.17 0.20 0.185 0.17
 ```
 
-`v02_speed` 在平地按 7% 常规随机、15% 直线启停与反向、7% 原地快转、13% 连续转弯、11% 入弯后制动、22% 松键再起步、25% 专项升降采样。速度工况在回合内保持腿高，初始腿高覆盖 17–33 cm。专项升降在静止或 ±0.50 m/s 匀速直行时交替升高、降低。按住时长从 0.26、0.70、1.70 s 中选择，零速指令保持 0.22、0.50 或 1.10 s 后再起步，同时采样同向连按与反向起步。快速转向请求上限为 ±4 rad/s。
+`v02_speed` 保留 10% 的驻车回合。其余平地回合按 7% 常规随机、15% 直线启停与反向、7% 原地快转、13% 连续转弯、11% 入弯后制动、22% 松键再起步、25% 专项升降采样。速度工况在回合内保持腿高，初始腿高覆盖 17–33 cm。专项升降在静止或 ±0.50 m/s 匀速直行时交替升高、降低。按住时长从 0.26、0.70、1.70 s 中选择，零速指令保持 0.22、0.50 或 1.10 s 后再起步，同时采样同向连按与反向起步。快速转向请求上限为 ±4 rad/s。
 
 平地默认线速度档位为 0.8、1.2、1.6 m/s，超过当前速度上限的采样会截断。扩展高速档时，增加 `command_speed_levels` 并用 `--forward-limit` 设置对应上限。线加减速度上限按回合以 35%、45%、20% 的概率选 1、2、4 m/s²。偏航角加速度上限为 24 rad/s²，轮速和底盘摩擦圆会进一步限制组合指令。`v02_speed` 的高度参考限速 0.30 m/s、限加速度 0.90 m/s²。
 
-`task.locomotion.stability.flat_pitch` 约束平地车身的俯仰和俯仰角速度。`braking_recovery_pitch` 在平地刹停参考接近零后加罚俯仰误差和俯仰角速度。`braking_yaw` 在平地直线减速与回稳时加罚偏航角速度误差。`height_transition` 在平地双轮接地、升降及其后的短窗口内约束横滚、左右腿伸缩速度差和实际腿电机目标的二阶差分。回放分别测启停与升降。TensorBoard 记录回合平均误差及 pitch、roll 峰值。`v02_rough` 的平地回合继续采样同样的松键时长。
+回放分别测启停与升降。TensorBoard 记录回合平均误差及 pitch、roll 峰值。`v02_rough` 的平地回合继续采样同样的松键时长。
 
 地形采样包含 40% 平地、25% 上下坡、20% 随机起伏、15% 凸条和低阶梯。通过 `--surface flat|slope|rough|bars|stairs` 选择回放地形，用训练未见的 `--terrain-seed` 验证。正、负 `--speed` 分别检验同一条坡或阶梯的两个方向。按实际越过的障碍、跌倒和过障后速度恢复评估效果。高度范围可在 TOML 的 `task.locomotion.height_range` 内逐步扩大，允许的配置范围为 17–33 cm。程序会在启动时校验闭链姿态，扩展档位还需验证承重和力矩余量。
 
@@ -73,11 +75,9 @@ uv run --locked main.py demo --checkpoint outputs/v02_height_33_40nm/model_599.p
 
 回放同时检查行进升降、低位回归、高位保持和力矩饱和。也可用 `--height-sequence 0.17 0.33 0.17` 单独检查跨全行程的高度切换。
 
-V.02 各运动训练阶段继承 `configs/flat.toml` 中的 `task.locomotion.stability`。防劈叉采用华南虎 V14 Rough-v1 的车体系轮心前后差平方惩罚，超过 5 cm 时追加固定惩罚。防抖采用动作一阶差分、腿和轮分别计权的动作二阶差分，以及关节速度和加速度惩罚。公共车身姿态约束包含横滚和俯仰，平地额外抑制 pitch，指令稳定后额外抑制电机目标跳变和车身角速度。各阶段可设置针对起步或急刹的权重。
+华南虎 V14 Rough-v1 的防劈叉项按车体系轮心前后差计罚，超过 5 cm 时追加固定惩罚。动作平滑项包括一阶和二阶动作差分以及关节速度和加速度，腿和轮分别计权。TensorBoard 的 `leg_fore_aft_gap_cm` 记录轮心相对同侧髋中心的前后投影差。
 
-TensorBoard 的 `leg_fore_aft_gap_cm` 仍记录轮心相对同侧髋中心的前后投影差，便于与历史训练比较。用旧 checkpoint 同目录的快照回放或恢复训练时沿用旧 reward。续训时显式传入 `--config configs/v02_low.toml` 可启用公共 reward 并接续腿高课程。
-
-`v02_rough` 沿用 17–33 cm 腿高、±40 N·m 腿部限矩与制动姿态奖励，速度请求为 ±0.8 m/s。坡度为 3–6°，随机起伏高度在 ±6 mm 内，凸条和单级台阶高 6–12 mm。每个非平地回合随机选择一个行驶方向，并沿同方向持续采样 0.52–0.80 m/s 的纵向速度请求，让机器人驶离平坦起点并越过连续障碍。平地回合保留随机速度和转向指令。TensorBoard 的 `Episode/terrain_progress_m` 记录车体在赛道纵向走过的最大距离。
+`v02_rough` 沿用 17–33 cm 腿高和 ±40 N·m 腿部限矩，速度请求为 ±0.8 m/s。坡度为 3–6°，随机起伏高度在 ±6 mm 内，凸条和单级台阶高 6–12 mm。每个非平地回合随机选择一个行驶方向，并沿同方向持续采样 0.52–0.80 m/s 的纵向速度请求，让机器人驶离平坦起点并越过连续障碍。平地回合保留随机速度和转向指令。TensorBoard 的 `Episode/terrain_progress_m` 记录车体在赛道纵向走过的最大距离。
 
 ## 旧平地 PPO 短训与回放
 
@@ -86,7 +86,7 @@ uv run --locked main.py train --num-envs 256 --iterations 100 --output outputs/p
 uv run --locked main.py demo --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --video outputs/ppo_v02_replay.mp4
 ```
 
-旧平地 PPO 使用独立的策略和 critic 观测，奖励参考 `Flat-v0`，包含速度、姿态、高度跟踪和主驱动轮承重。Checkpoint 校验机器人型号和任务观测结构。
+平地 PPO 使用独立的策略和 critic 观测。Checkpoint 校验机器人型号和任务观测结构。
 
 ## 从 checkpoint 继续训练
 
@@ -106,7 +106,7 @@ uv run --locked main.py train --num-envs 64 --iterations 12 --live-port 6007
 
 Genesis 自动打开，显示并行环境 0 的机器人和当前地形。跑道按地形分色，高差会加深台阶边缘。打开 [实时训练页](http://127.0.0.1:6007/) 查看同一台机器人的地形、速度、位移、车身离地高度和姿态，目标值与当前值并列显示。目标位移由本回合的速度和转向指令逐步推算。关闭 Genesis 窗口后，训练和网页监控继续运行。`--live-fps` 可调整窗口刷新率，默认 60 FPS。
 
-`v02_scut_body_stability.toml` 用 `base_link` 原点到局部地面的垂向高度计算高度奖励，并记录 `Episode/body_height_mae_cm`。原 V0.2 的 0.17–0.33 m 髋到轮心指令对应约 0.0975–0.2575 m 的车身离地高度。回放可用 `--body-height 0.13` 或 `--body-height-sequence 0.13 0.22 0.13` 指定离地高度。`--height` 和 `--height-sequence` 使用髋到轮心的旧口径。
+连续腿高任务用 `base_link` 原点到局部地面的垂向高度计算高度奖励，并记录 `Episode/body_height_mae_cm`。V0.2 的 0.17–0.33 m 髋到轮心指令对应约 0.0975–0.2575 m 的车身离地高度。回放可用 `--body-height 0.13` 或 `--body-height-sequence 0.13 0.22 0.13` 指定离地高度。`--height` 和 `--height-sequence` 使用髋到轮心口径。
 
 本地和远程监控页都提供训练轮次、采样速度、平均回合奖励、平均回合长度和两类 PPO 损失。曲线每轮更新，保留最近 300 轮，悬停可查看该轮数值。
 
@@ -167,22 +167,26 @@ uv run --locked tensorboard --logdir outputs --host 127.0.0.1 --port 6006
 
 ## 调参与实验记录
 
-用 `--config` 指定 TOML 覆盖项，未填写的项沿用 [configs/flat.toml](configs/flat.toml)。`task.reward` 中的值是各奖励项相对于默认公式的倍率。可以将以下内容保存为 `slow_flat.toml`，再运行 `uv run --locked main.py train --config slow_flat.toml`。
+用 `--config` 指定 TOML 覆盖项，未填写的项沿用 [configs/flat.toml](configs/flat.toml)。可以将以下内容保存为 `slow_flat.toml`，再运行 `uv run --locked main.py train --config slow_flat.toml`。
 
 ```toml
 [task]
 forward_command = [-0.3, 0.3]
 
-[task.reward]
-action_rate = 1.5
-
 [ppo.algorithm]
 learning_rate = 0.00005
 ```
 
+华南虎 V14 Rough-v1 奖励的默认权重、尺度和阈值集中在 `task.scut_rough_reward` 下。要单独调整某个实验，把对应小节和参数写进该实验的 TOML。下例将 `v02_speed` 的地面俯仰二次惩罚权重从 `2.0` 调到 `3.0`。 [默认配置](configs/flat.toml)
+
+```toml
+[task.scut_rough_reward.tracking]
+pitch_penalty_weight = 3.0
+```
+
 每次训练在输出目录中生成 `run_config.json`。其中包含合并后的任务与 PPO 配置，以及实际使用的机器人型号、MJCF 路径与哈希、种子、环境数、迭代数和仿真步长。省略 `--output` 时自动创建带时间戳的目录。手动指定时使用新目录或空目录，每次运行独立保存。
 
-回放时默认使用 checkpoint 同目录的 `run_config.json`，早期权重沿用默认配置。可用 `--config` 显式指定 TOML 或 JSON 快照。复跑某次训练时，用 `--config` 读取其快照，并按 `run` 字段填写机器人、模型、种子、环境数和迭代数等启动参数。回放 SCUT 或自定义 MJCF 时，带上对应的 `--robot` 或 `--model`。
+回放时默认使用 checkpoint 同目录的 `run_config.json`。可用 `--config` 显式指定 TOML 或 JSON 快照。复跑某次训练时，用 `--config` 读取当前格式的快照，并按 `run` 字段填写机器人、模型、种子、环境数和迭代数等启动参数。包含已删除 reward 配置的旧快照需要在原版本运行。
 
 ## 华南理工参考模型
 

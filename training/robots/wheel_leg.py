@@ -110,7 +110,6 @@ class WheelLegFlatEnv(FlatEnv):
     leg_signs = (1.0, -1.0, 1.0, -1.0)
     wheel_signs = (1.0, -1.0)
     expected_equalities = 12
-    min_support_load = 100.0
 
     def _robot_morph(self, model_path, viewer):
         return gs.morphs.MJCF(file=_collision_model(model_path, include_visuals=viewer),

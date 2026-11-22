@@ -2,17 +2,8 @@
 forward_command = [-1.6, 1.6]
 yaw_command = [-4.0, 4.0]
 
-[task.reward]
-speed = 1.30
-acceleration_pitch = 1.70
-braking_pitch = 1.70
-braking_recovery_pitch = 1.50
-braking_yaw = 1.00
-height_transition = 1.0
-
 [task.locomotion]
 enabled = true
-body_height_tracking = true
 leg_torque_limit = 40.0
 height_range = [0.17, 0.33]
 height_max_probability = 0.10
@@ -22,12 +13,17 @@ speed_maneuvers = true
 braking_maneuvers = true
 launch_maneuvers = true
 height_maneuvers = true
+stationary_episode_fraction = 0.10
 launch_press_seconds = [0.26, 0.70, 1.70]
 launch_stop_seconds = [0.22, 0.50, 1.10]
 speed_maneuver_weights = [0.07, 0.15, 0.07, 0.13, 0.11, 0.22, 0.25]
 command_speed_levels = [0.8, 1.2, 1.6]
 command_acceleration_levels = [1.0, 2.0, 4.0]
 command_acceleration_weights = [0.35, 0.45, 0.20]
+
+# Override SCUT V14 Rough-v1 reward settings here. See task.scut_rough_reward in flat.toml for all defaults.
+# [task.scut_rough_reward.tracking]
+# pitch_penalty_weight = 2.0
 
 [ppo]
 save_interval = 50

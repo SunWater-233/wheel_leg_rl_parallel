@@ -4,8 +4,6 @@ yaw_command = [-1.5, 1.5]
 
 [task.locomotion]
 enabled = true
-reward_profile = "scut_rough_v1"
-body_height_tracking = true
 leg_torque_limit = 40.0
 height_range = [0.17, 0.33]
 height_max_probability = 0.10

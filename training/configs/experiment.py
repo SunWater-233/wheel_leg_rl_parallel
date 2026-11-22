@@ -42,31 +42,41 @@ def _validate_range(settings, name):
     return limits
 
 
+def _validate_scut_reward(reward):
+    divisors = {
+        "tracking": {"forward_error_width", "yaw_error_width", "pitch_width", "roll_width",
+                     "tilt_speed_width", "height_error_width"},
+        "airborne": {"wheel_torque_scale", "wheel_speed_scale", "centering_width"},
+    }
+    for section, settings in reward.items():
+        for name, value in settings.items():
+            path = f"task.scut_rough_reward.{section}.{name}"
+            if not isfinite(value) or value < 0:
+                raise ValueError(f"{path} must be finite and nonnegative")
+            if value == 0 and name in divisors.get(section, ()):
+                raise ValueError(f"{path} must be positive")
+    airborne = reward["airborne"]
+    if airborne["knee_margin_fraction"] > 0.5:
+        raise ValueError("task.scut_rough_reward.airborne.knee_margin_fraction must be at most 0.5")
+    if airborne["post_contact_end_seconds"] < airborne["wheel_contact_transition_seconds"]:
+        raise ValueError("task.scut_rough_reward.airborne.post_contact_end_seconds must not precede "
+                         "wheel_contact_transition_seconds")
+
+
 def _validate_settings(settings):
     task = settings["task"]
+    _validate_scut_reward(task["scut_rough_reward"])
     if not isfinite(task["episode_seconds"]) or task["episode_seconds"] <= 0:
         raise ValueError("task.episode_seconds must be finite and positive")
     if not isfinite(task["friction"]) or task["friction"] < 0:
         raise ValueError("task.friction must be finite and nonnegative")
     for name in ("forward_command", "yaw_command"):
         _validate_range(task, name)
-    for name, weight in task["reward"].items():
-        if not isfinite(weight) or weight < 0:
-            raise ValueError(f"task.reward.{name} must be finite and nonnegative")
     for name, std in task["observation_noise"].items():
         if not isfinite(std) or std < 0:
             raise ValueError(f"task.observation_noise.{name} must be finite and nonnegative")
 
     locomotion = task["locomotion"]
-    for name, value in locomotion["stability"].items():
-        if name != "enabled" and (not isfinite(value) or value < 0):
-            raise ValueError(f"task.locomotion.stability.{name} must be finite and nonnegative")
-    if locomotion["reward_profile"] not in ("v02", "scut_rough_v1"):
-        raise ValueError("task.locomotion.reward_profile must be v02 or scut_rough_v1")
-    if locomotion["reward_profile"] == "scut_rough_v1" and not (
-        locomotion["enabled"] and locomotion["body_height_tracking"]
-    ):
-        raise ValueError("scut_rough_v1 rewards require locomotion with body height tracking")
     leg_torque_limit = locomotion["leg_torque_limit"]
     if not isfinite(leg_torque_limit) or leg_torque_limit <= 0:
         raise ValueError("task.locomotion.leg_torque_limit must be finite and positive")
@@ -98,6 +108,8 @@ def _validate_settings(settings):
         raise ValueError("launch_maneuvers requires enabled locomotion and speed_maneuvers")
     if locomotion["height_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
         raise ValueError("height_maneuvers requires enabled locomotion and speed_maneuvers")
+    if not 0 <= locomotion["stationary_episode_fraction"] <= 1:
+        raise ValueError("stationary_episode_fraction must be in [0, 1]")
     for name in ("launch_press_seconds", "launch_stop_seconds"):
         durations = locomotion[name]
         if durations and (not locomotion["launch_maneuvers"] or any(
@@ -193,12 +205,6 @@ def load_snapshot(path):
     if not isinstance(snapshot, dict):
         raise ValueError(f"Expected a JSON object in {path}")
     run = snapshot.pop("run", {})
-    # Old snapshots retain their original reward when replayed or resumed without --config.
-    task = snapshot.setdefault("task", {})
-    if isinstance(task, dict):
-        locomotion = task.setdefault("locomotion", {})
-        if isinstance(locomotion, dict):
-            locomotion.setdefault("stability", {"enabled": False})
     return _merge_config(snapshot), run
 
 

@@ -2,14 +2,8 @@
 forward_command = [-0.8, 0.8]
 yaw_command = [-0.75, 0.75]
 
-[task.reward]
-speed = 1.30
-braking_pitch = 1.20
-braking_yaw = 1.00
-
 [task.locomotion]
 enabled = true
-body_height_tracking = true
 leg_torque_limit = 40.0
 height_range = [0.17, 0.33]
 height_max_probability = 0.10

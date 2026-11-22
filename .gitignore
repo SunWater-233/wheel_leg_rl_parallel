@@ -22,3 +22,5 @@ Desktop.ini
 
 # vscode工作区
 *.code-workspace
+
+.cache

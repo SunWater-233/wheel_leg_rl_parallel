@@ -22,7 +22,6 @@ class WheelbipeFlatEnv(FlatEnv):
     wheel_bodies = ("left_wheel_link", "right_wheel_link")
     body_contacts = ("base_link", "gimbal_yaw_link", "gimbal_pitch_link")
     expected_equalities = 6
-    min_support_load = 60.0
 
     def _robot_morph(self, model_path, viewer):
         return gs.morphs.MJCF(file=str(model_path), pos=(0.0, 0.0, 0.23), visualization=viewer)

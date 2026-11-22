@@ -9,6 +9,7 @@ from tensordict import TensorDict
 import torch
 
 from configs.experiment import load_config
+from robots.scut_rough_reward import ScutRoughReward
 
 
 class FlatEnv(VecEnv):
@@ -52,6 +53,7 @@ class FlatEnv(VecEnv):
         self.scene.build(n_envs=num_envs, env_spacing=(1.5, 1.5), center_envs_at_origin=self.step_visualizer)
         self.leg_dofs = self._dofs(self.leg_joints)
         self.wheel_dofs = self._dofs(self.wheel_joints)
+        self.wheels = [self.robot.get_joint(name) for name in self.wheel_joints]
         self.spring_dofs = self._dofs(self.spring_joints)
         self.action_dofs = self.leg_dofs + self.wheel_dofs
         self.body_links = [self.robot.get_link(name).idx_local for name in self.body_contacts]
@@ -66,6 +68,8 @@ class FlatEnv(VecEnv):
         self.action_direction = torch.cat((self.leg_direction, self.wheel_direction))
         self.episode_length_buf = torch.zeros(num_envs, dtype=torch.long, device=self.device)
         self.commands = torch.zeros((num_envs, 3), device=self.device)
+        self.body_clearance = self.commands.new_zeros(num_envs)
+        self.body_height_offset = 0.0
         self.last_actions = torch.zeros((num_envs, self.num_actions), device=self.device)
         self.world_gravity = torch.tensor((0.0, 0.0, -1.0), device=self.device).expand(num_envs, -1).contiguous()
         self.all_envs = torch.arange(num_envs, device=self.device)
@@ -80,7 +84,7 @@ class FlatEnv(VecEnv):
         return "平地"
 
     def _initialize_task(self):
-        pass
+        self.scut_reward = ScutRoughReward(self)
 
     @abstractmethod
     def _robot_morph(self, model_path, viewer):
@@ -112,6 +116,7 @@ class FlatEnv(VecEnv):
         self.robot.set_qpos(self.home_qpos[ids], envs_idx=ids, zero_velocity=True)
         self.episode_length_buf[ids] = 0
         self.last_actions[ids] = 0.0
+        self.scut_reward.reset(ids)
         for axis, key in enumerate(("forward_command", "yaw_command")):
             low, high = self.cfg[key]
             self.commands[ids, axis] = torch.rand(ids.numel(), device=self.device) * (high - low) + low
@@ -139,43 +144,11 @@ class FlatEnv(VecEnv):
         critic = torch.cat((policy, lin_vel), dim=-1)
         return TensorDict({"policy": policy, "critic": critic}, batch_size=[self.num_envs])
 
-    def _height_and_termination(self, height, gravity, contact):
-        height_error = (height - self.commands[:, 2]).square()
+    def _termination(self, height, gravity, contact):
+        self.body_clearance.copy_(height)
         body_contact = contact[:, self.body_links].norm(dim=-1).amax(dim=1) > 10.0
         fallen = body_contact | (height < self.min_height) | (gravity[:, 2] > -0.65)
-        height_reward = torch.exp(-height_error / 0.025) - 100.0 * height_error
-        return height_reward, fallen, False
-
-    def _task_cost(self, lin_vel, ang_vel, actions):
-        return 0.0
-
-    def _action_cost(self, actions):
-        action_rate = (actions - self.last_actions).square().sum(dim=1)
-        return (0.01 * self.cfg["reward"]["action_rate"]) * action_rate
-
-    def _reward(self, lin_vel, ang_vel, gravity, contact, height_reward, fallen, actions):
-        normal_forces = contact[:, :, 2].clamp_min(0.0)
-        normal_load = normal_forces.sum(dim=1)
-        wheel_load = normal_forces[:, self.wheel_links].sum(dim=1)
-        wheel_support = wheel_load / normal_load.clamp_min(self.min_support_load)
-        other_support = (normal_load - wheel_load) / normal_load.clamp_min(self.min_support_load)
-        speed_error = (lin_vel[:, 0] - self.commands[:, 0]).square() + lin_vel[:, 1].square()
-        yaw_error = (ang_vel[:, 2] - self.commands[:, 1]).square()
-        tilt = gravity[:, :2].square()
-        weights = self.cfg["reward"]
-        return (
-            weights["speed"] * torch.exp(-speed_error / 0.5)
-            + (2.0 * weights["speed"]) * torch.exp(-speed_error / 0.1) - weights["speed"] * speed_error
-            + weights["yaw"] * torch.exp(-yaw_error / 0.25) - (0.25 * weights["yaw"]) * yaw_error
-            + weights["upright"] * torch.exp(-tilt[:, 0] / 0.02) + weights["upright"] * torch.exp(-tilt[:, 1] / 0.01)
-            - (2.0 * weights["upright"]) * tilt.sum(dim=1)
-            + weights["height"] * height_reward
-            - self._task_cost(lin_vel, ang_vel, actions)
-            + (2.0 * weights["wheel_support"]) * wheel_support - (2.0 * weights["wheel_support"]) * other_support
-            - (0.5 * weights["vertical_velocity"]) * lin_vel[:, 2].square()
-            - (0.05 * weights["angular_velocity"]) * ang_vel[:, :2].square().sum(dim=1)
-            - self._action_cost(actions) - (200.0 * weights["fall"]) * fallen
-        )
+        return fallen, False
 
     def _after_step(self, extras, done, lin_vel, ang_vel):
         pass
@@ -194,12 +167,10 @@ class FlatEnv(VecEnv):
         self.episode_length_buf += 1
         lin_vel, ang_vel, gravity, height = self._base_state()
         contact = self.robot.get_links_net_contact_force()
-        height_reward, fallen, out_of_bounds = self._height_and_termination(height, gravity, contact)
+        fallen, out_of_bounds = self._termination(height, gravity, contact)
         time_outs = ((self.episode_length_buf >= self.max_episode_length) | out_of_bounds) & ~fallen
         done = fallen | time_outs
-        reward = self.control_dt * self._reward(
-            lin_vel, ang_vel, gravity, contact, height_reward, fallen, actions
-        )
+        reward = self.control_dt * self.scut_reward(lin_vel, ang_vel, gravity, contact, fallen, actions)
         extras = {
             "time_outs": time_outs,
             "fallen": fallen,

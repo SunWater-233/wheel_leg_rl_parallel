@@ -9,6 +9,9 @@ from scipy.optimize import least_squares
 from robots.wheel_leg import HOME_JOINTS
 
 
+STANCE_SPAWN_GAP = 0.002
+
+
 def solve_stances(model_path, height_limits, wheel_radius):
     model = mujoco.MjModel.from_xml_path(str(model_path.resolve()))
     model.opt.disableflags |= int(mujoco.mjtDisableBit.mjDSBL_CONTACT)
@@ -50,6 +53,6 @@ def solve_stances(model_path, height_limits, wheel_radius):
                 or np.any((leg_lengths < 0.16) | (leg_lengths > 0.335))):
             raise ValueError(f"Cannot solve a closed-chain stance at {height:.3f} m within the joint and leg limits")
         wheels_z = data.xanchor[wheels, 2] - data.xpos[base, 2]
-        poses[index, 0] = wheel_radius - wheels_z.min() + 0.002
+        poses[index, 0] = wheel_radius - wheels_z.min() + STANCE_SPAWN_GAP
         poses[index, 1:] = angles
     return poses

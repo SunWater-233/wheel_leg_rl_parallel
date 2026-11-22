@@ -1,5 +1,17 @@
 [task.locomotion]
 enabled = true
+body_height_tracking = true
+leg_torque_limit = 40.0
+height_range = [0.17, 0.33]
+height_max_probability = 0.10
+height_lowering_schedule = [
+    [0, 0.33],
+    [80, 0.33],
+    [160, 0.30],
+    [280, 0.25],
+    [450, 0.20],
+    [600, 0.17],
+]
 
 [ppo]
 save_interval = 100

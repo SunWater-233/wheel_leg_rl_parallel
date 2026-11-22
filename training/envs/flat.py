@@ -149,6 +149,34 @@ class FlatEnv(VecEnv):
     def _task_cost(self, lin_vel, ang_vel, actions):
         return 0.0
 
+    def _action_cost(self, actions):
+        action_rate = (actions - self.last_actions).square().sum(dim=1)
+        return (0.01 * self.cfg["reward"]["action_rate"]) * action_rate
+
+    def _reward(self, lin_vel, ang_vel, gravity, contact, height_reward, fallen, actions):
+        normal_forces = contact[:, :, 2].clamp_min(0.0)
+        normal_load = normal_forces.sum(dim=1)
+        wheel_load = normal_forces[:, self.wheel_links].sum(dim=1)
+        wheel_support = wheel_load / normal_load.clamp_min(self.min_support_load)
+        other_support = (normal_load - wheel_load) / normal_load.clamp_min(self.min_support_load)
+        speed_error = (lin_vel[:, 0] - self.commands[:, 0]).square() + lin_vel[:, 1].square()
+        yaw_error = (ang_vel[:, 2] - self.commands[:, 1]).square()
+        tilt = gravity[:, :2].square()
+        weights = self.cfg["reward"]
+        return (
+            weights["speed"] * torch.exp(-speed_error / 0.5)
+            + (2.0 * weights["speed"]) * torch.exp(-speed_error / 0.1) - weights["speed"] * speed_error
+            + weights["yaw"] * torch.exp(-yaw_error / 0.25) - (0.25 * weights["yaw"]) * yaw_error
+            + weights["upright"] * torch.exp(-tilt[:, 0] / 0.02) + weights["upright"] * torch.exp(-tilt[:, 1] / 0.01)
+            - (2.0 * weights["upright"]) * tilt.sum(dim=1)
+            + weights["height"] * height_reward
+            - self._task_cost(lin_vel, ang_vel, actions)
+            + (2.0 * weights["wheel_support"]) * wheel_support - (2.0 * weights["wheel_support"]) * other_support
+            - (0.5 * weights["vertical_velocity"]) * lin_vel[:, 2].square()
+            - (0.05 * weights["angular_velocity"]) * ang_vel[:, :2].square().sum(dim=1)
+            - self._action_cost(actions) - (200.0 * weights["fall"]) * fallen
+        )
+
     def _after_step(self, extras, done, lin_vel, ang_vel):
         pass
 
@@ -166,37 +194,16 @@ class FlatEnv(VecEnv):
         self.episode_length_buf += 1
         lin_vel, ang_vel, gravity, height = self._base_state()
         contact = self.robot.get_links_net_contact_force()
-        normal_forces = contact[:, :, 2].clamp_min(0.0)
-        wheel_forces = normal_forces[:, self.wheel_links]
-        normal_load = normal_forces.sum(dim=1)
-        wheel_load = wheel_forces.sum(dim=1)
-        wheel_support = wheel_load / normal_load.clamp_min(self.min_support_load)
-        other_support = (normal_load - wheel_load) / normal_load.clamp_min(self.min_support_load)
         height_reward, fallen, out_of_bounds = self._height_and_termination(height, gravity, contact)
         time_outs = ((self.episode_length_buf >= self.max_episode_length) | out_of_bounds) & ~fallen
         done = fallen | time_outs
-        speed_error = (lin_vel[:, 0] - self.commands[:, 0]).square() + lin_vel[:, 1].square()
-        yaw_error = (ang_vel[:, 2] - self.commands[:, 1]).square()
-        tilt = gravity[:, :2].square()
-        action_rate = (actions - self.last_actions).square().sum(dim=1)
-        weights = self.cfg["reward"]
-        reward = self.control_dt * (
-            weights["speed"] * torch.exp(-speed_error / 0.5)
-            + (2.0 * weights["speed"]) * torch.exp(-speed_error / 0.1) - weights["speed"] * speed_error
-            + weights["yaw"] * torch.exp(-yaw_error / 0.25) - (0.25 * weights["yaw"]) * yaw_error
-            + weights["upright"] * torch.exp(-tilt[:, 0] / 0.02) + weights["upright"] * torch.exp(-tilt[:, 1] / 0.01)
-            - (2.0 * weights["upright"]) * tilt.sum(dim=1)
-            + weights["height"] * height_reward
-            - self._task_cost(lin_vel, ang_vel, actions)
-            + (2.0 * weights["wheel_support"]) * wheel_support - (2.0 * weights["wheel_support"]) * other_support
-            - (0.5 * weights["vertical_velocity"]) * lin_vel[:, 2].square()
-            - (0.05 * weights["angular_velocity"]) * ang_vel[:, :2].square().sum(dim=1)
-            - (0.01 * weights["action_rate"]) * action_rate - (200.0 * weights["fall"]) * fallen
+        reward = self.control_dt * self._reward(
+            lin_vel, ang_vel, gravity, contact, height_reward, fallen, actions
         )
         extras = {
             "time_outs": time_outs,
             "fallen": fallen,
-            "wheel_contacts": wheel_forces > 1.0,
+            "wheel_contacts": contact[:, self.wheel_links, 2] > 1.0,
             "terminal_height": height,
         }
         self.last_actions.copy_(actions)

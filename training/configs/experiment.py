@@ -58,6 +58,15 @@ def _validate_settings(settings):
             raise ValueError(f"task.observation_noise.{name} must be finite and nonnegative")
 
     locomotion = task["locomotion"]
+    for name, value in locomotion["stability"].items():
+        if name != "enabled" and (not isfinite(value) or value < 0):
+            raise ValueError(f"task.locomotion.stability.{name} must be finite and nonnegative")
+    if locomotion["reward_profile"] not in ("v02", "scut_rough_v1"):
+        raise ValueError("task.locomotion.reward_profile must be v02 or scut_rough_v1")
+    if locomotion["reward_profile"] == "scut_rough_v1" and not (
+        locomotion["enabled"] and locomotion["body_height_tracking"]
+    ):
+        raise ValueError("scut_rough_v1 rewards require locomotion with body height tracking")
     leg_torque_limit = locomotion["leg_torque_limit"]
     if not isfinite(leg_torque_limit) or leg_torque_limit <= 0:
         raise ValueError("task.locomotion.leg_torque_limit must be finite and positive")
@@ -66,16 +75,50 @@ def _validate_settings(settings):
     low, high = locomotion["height_range"]
     if not HEIGHT_LIMITS[0] <= low <= locomotion["height_nominal"] <= high <= HEIGHT_LIMITS[1]:
         raise ValueError("height_range and height_nominal must fit the 0.17–0.33 m chassis range")
+    schedule = locomotion["height_lowering_schedule"]
+    if schedule:
+        if not locomotion["enabled"] or any(
+            not isinstance(point, list) or len(point) != 2 or type(point[0]) is not int or point[0] < 0
+            or type(point[1]) not in (int, float) or not low <= point[1] <= high for point in schedule
+        ):
+            raise ValueError("height_lowering_schedule requires locomotion and [iteration, height] pairs in height_range")
+        if schedule[0][0] != 0 or any(
+            a[0] >= b[0] or a[1] < b[1] for a, b in zip(schedule, schedule[1:])
+        ):
+            raise ValueError("height_lowering_schedule must start at iteration 0 and lower height over increasing iterations")
     if not 0 <= locomotion["height_max_probability"] < 0.40:
         raise ValueError("height_max_probability must be in [0, 0.40) to leave room for continuous sampling")
     if not 0 < locomotion["height_rate"] <= MAX_HEIGHT_RATE or locomotion["command_seconds"][0] <= 0:
         raise ValueError("Use a positive command period and a height_rate within 0–1.2 m/s")
+    if not isfinite(locomotion["height_acceleration"]) or locomotion["height_acceleration"] < 0:
+        raise ValueError("height_acceleration must be finite and nonnegative")
     if locomotion["braking_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
         raise ValueError("braking_maneuvers requires enabled locomotion and speed_maneuvers")
+    if locomotion["launch_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
+        raise ValueError("launch_maneuvers requires enabled locomotion and speed_maneuvers")
+    if locomotion["height_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
+        raise ValueError("height_maneuvers requires enabled locomotion and speed_maneuvers")
+    for name in ("launch_press_seconds", "launch_stop_seconds"):
+        durations = locomotion[name]
+        if durations and (not locomotion["launch_maneuvers"] or any(
+            type(v) not in (int, float) or not 0 < v < task["episode_seconds"] for v in durations
+        )):
+            raise ValueError(f"{name} requires launch_maneuvers and positive durations shorter than an episode")
     for name, maximum in (("command_speed_levels", MAX_FORWARD_SPEED),
                           ("command_acceleration_levels", MAX_FORWARD_ACCELERATION)):
         if any(type(value) not in (int, float) or not 0 < value <= maximum for value in locomotion[name]):
             raise ValueError(f"{name} must contain positive levels up to {maximum:g}")
+    maneuver_count = (
+        4 + locomotion["braking_maneuvers"] + locomotion["launch_maneuvers"] + locomotion["height_maneuvers"]
+        if locomotion["speed_maneuvers"] else 0
+    )
+    for name, length in (("speed_maneuver_weights", maneuver_count),
+                         ("command_acceleration_weights", len(locomotion["command_acceleration_levels"]))):
+        weights = locomotion[name]
+        if weights and (len(weights) != length or any(
+            type(value) not in (int, float) or not isfinite(value) or value < 0 for value in weights
+        ) or not any(weights)):
+            raise ValueError(f"{name} requires {length} nonnegative weights with a positive sum")
     if locomotion["terrain"] not in ("plane", "mixed", "scut_v1"):
         raise ValueError("terrain must be plane, mixed or scut_v1")
     has_terrain = locomotion["terrain"] != "plane"
@@ -150,6 +193,12 @@ def load_snapshot(path):
     if not isinstance(snapshot, dict):
         raise ValueError(f"Expected a JSON object in {path}")
     run = snapshot.pop("run", {})
+    # Old snapshots retain their original reward when replayed or resumed without --config.
+    task = snapshot.setdefault("task", {})
+    if isinstance(task, dict):
+        locomotion = task.setdefault("locomotion", {})
+        if isinstance(locomotion, dict):
+            locomotion.setdefault("stability", {"enabled": False})
     return _merge_config(snapshot), run
 
 

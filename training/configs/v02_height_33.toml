@@ -1,6 +1,3 @@
-[task.reward]
-leg_alignment = 1.0
-
 [task.locomotion]
 enabled = true
 leg_torque_limit = 40.0

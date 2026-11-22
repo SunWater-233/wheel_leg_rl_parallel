@@ -1,0 +1,8 @@
+[2624:31468:1122/161147.701:WARNING:t_skinfilemap.cpp(61)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v9.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v9.filemap.sogouime5813547f6b7
+[2624:31468:1122/161147.701:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:1
+[2624:31468:1122/161147.701:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:9
+[2624:31468:1122/161147.743:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi120.v9.filemap.sogouime
+[2624:31468:1122/161147.743:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:9
+[2624:31468:1122/161147.744:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:9
+[2624:31468:1122/161150.257:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0

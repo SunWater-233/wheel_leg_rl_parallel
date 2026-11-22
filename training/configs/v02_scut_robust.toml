@@ -4,9 +4,7 @@ yaw_command = [-1.5, 1.5]
 
 [task.reward]
 speed = 1.30
-leg_alignment = 1.40
 braking_pitch = 1.70
-settled_motion = 1.0
 
 [task.locomotion]
 enabled = true

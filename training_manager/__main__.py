@@ -32,7 +32,7 @@ def recent_metrics(directory):
         tags = set(events.Tags()["scalars"])
         selected = (
             "Perf/total_fps", "Perf/collection time", "Perf/learning_time",
-            "Episode/fall_rate", "Episode/forward_mae_m_s", "Episode/height_mae_cm",
+            "Episode/fall_rate", "Episode/forward_mae_m_s", "Episode/body_height_mae_cm", "Episode/height_mae_cm",
             "Episode/leg_saturation_rate",
         )
         return {tag: [{"step": item.step, "value": item.value} for item in events.Scalars(tag)[-5:]]

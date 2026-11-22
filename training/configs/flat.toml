@@ -11,9 +11,14 @@ steady_speed = 0.0 # locomotion cost for sustained straight-line speed error
 yaw = 1.0
 upright = 1.0
 height = 1.0
-leg_alignment = 0.0 # locomotion cost for left/right fore-aft offset difference
+flat_pitch = 0.0 # legacy locomotion snapshots
+leg_alignment = 0.0 # legacy locomotion snapshots
 braking_pitch = 0.0 # locomotion cost for excessive pitch and pitch rate during braking
-settled_motion = 0.0 # body-rate and motor-target continuity cost under settled flat-ground commands
+braking_recovery_pitch = 0.0 # locomotion cost for pitch after a flat-ground stop command reaches zero
+braking_yaw = 0.0 # yaw-rate error during flat straight-line braking and recovery
+acceleration_pitch = 0.0 # flat-ground chassis stabilization during a forward-speed ramp
+settled_motion = 0.0 # legacy locomotion snapshots
+height_transition = 0.0 # flat-ground roll and leg motion cost during height changes and settling
 wheel_support = 1.0
 vertical_velocity = 1.0
 angular_velocity = 1.0
@@ -53,16 +58,26 @@ joint_velocity = 0.0 # rad/s, before observation scaling
 
 [task.locomotion]
 enabled = false
+reward_profile = "v02"
 leg_torque_limit = 12.0 # N·m per active leg joint
 height_range = [0.17, 0.20] # hip-to-wheel vertical projection, m
+body_height_tracking = false # track base_link clearance above local ground instead of hip-to-wheel height
+height_lowering_schedule = [] # [PPO iteration, minimum sampled leg height in m]
 height_nominal = 0.20
 height_max_probability = 0.0 # probability of sampling height_range's upper endpoint
 height_rate = 0.30 # m/s
+height_acceleration = 0.0 # m/s²; zero uses the legacy rate-only command
 command_seconds = [2.0, 4.0]
 speed_maneuvers = false
 braking_maneuvers = false
+launch_maneuvers = false # repeated start, cruise and stop at a fixed leg height
+height_maneuvers = false # reserve flat-ground episodes for height changes at rest or at constant speed
+launch_press_seconds = [] # optional total press durations, including the speed ramp
+launch_stop_seconds = [] # optional time held at zero command after the braking ramp
+speed_maneuver_weights = [] # random, straight, spin, slalom, optional corner brake, launch, and height changes
 command_speed_levels = [] # per-episode speed caps in m/s
 command_acceleration_levels = [] # per-episode acceleration caps in m/s²
+command_acceleration_weights = [] # optional weights for command_acceleration_levels
 cliff_approach_speed = 0.0 # optional training speed cap before a cliff landing
 terrain = "plane"
 terrain_traversal = false
@@ -71,6 +86,22 @@ cliff_drop_heights = [] # m; three forward-drop heights for scut_v1
 slope_degrees = [3.0, 6.0]
 roughness = 0.005 # m
 obstacle_height = [0.005, 0.010] # m
+
+# Shared by the V0.2 locomotion stages. Motion penalties follow SCUT V14 Rough-v1.
+[task.locomotion.stability]
+enabled = true
+flat_pitch = 1.50
+settled_motion = 1.0
+no_fork_distance = 0.05 # forward wheel-center gap in body frame, m
+no_fork = 1.0
+no_fork_square_scale = 5.0 # 1/m
+action_rate = 0.002
+action_smoothness_leg = 0.005
+action_smoothness_wheel = 0.001
+leg_joint_acc = 1e-7
+wheel_acc = 2e-9
+leg_joint_vel = 1e-3
+wheel_vel = 2e-6
 
 [ppo]
 num_steps_per_env = 24

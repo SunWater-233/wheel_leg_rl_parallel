@@ -75,6 +75,8 @@ def train(env, options, output, settings, live_view=None):
         load_checkpoint(runner, options.init_checkpoint, load_optimizer=False)
         runner.current_learning_iteration = 0
         print(f"Initializing from {options.init_checkpoint} with a fresh optimizer", flush=True)
+    if isinstance(env, WheelLegLocomotionEnv):
+        env.start_height_curriculum(runner.current_learning_iteration, runner.num_steps_per_env)
     save_run_config(output, settings, options, type(env), env.num_envs)
     try:
         runner.learn(num_learning_iterations=options.iterations, init_at_random_ep_len=True)
@@ -107,7 +109,7 @@ def attach_local_view(env, live_view, camera, fps):
     speed, yaw = env.commands[0, :2].tolist()
     reference_x = reference_y = heading = 0.0
     next_frame = next_sample = 0.0
-    use_leg_height = env.task_name == "locomotion"
+    terrain_locomotion = isinstance(env, WheelLegLocomotionEnv)
 
     def show_terrain():
         terrain = env.terrain_description()
@@ -140,7 +142,10 @@ def attach_local_view(env, live_view, camera, fps):
         if now >= next_sample:
             next_sample = now + 0.1
             lin_vel, ang_vel, gravity, base_height = env._base_state()
-            height = env.leg_heights(gravity)[0].mean() if use_leg_height else base_height[0]
+            height = base_height[0]
+            if terrain_locomotion:
+                height = height - env.ground_height_at(env.robot.get_pos())[0].nan_to_num()
+                height_target += env.body_height_offset
             gx, gy, gz = gravity[0].unbind()
             roll = torch.rad2deg(torch.atan2(-gy, -gz))
             pitch = torch.rad2deg(torch.atan2(gx, torch.hypot(gy, gz)))
@@ -200,7 +205,7 @@ def demo(env, options, ppo, live_view=None):
         print(f"Genesis keyboard drive: W/S forward/back, A/D steer, Space stop, "
               f"forward speed limit {drive_speed:g} m/s", flush=True)
         if locomotion:
-            print("Z/X raise/lower the continuous leg-height target", flush=True)
+            print("Z/X raise/lower the continuous body-height target", flush=True)
     elif viewer is not None:
         from tools.viewer_drive import ViewerFollow
 
@@ -271,8 +276,9 @@ def demo(env, options, ppo, live_view=None):
         if locomotion:
             falls += int(extras["fallen"].sum())
             saturated_steps += int(extras["leg_saturated"][0])
-            left, right = extras["leg_heights"][0].tolist()
-            height_error += abs((left + right) * 0.5 - height_reference)
+            body_height = extras["body_clearance"][0].item()
+            body_reference = height_reference + env.body_height_offset
+            height_error += abs(body_height - body_reference)
             posture_max = torch.maximum(posture_max, extras["posture"][0])
             pitch_peak = torch.maximum(pitch_peak, extras["pitch_deg"][0].abs())
         speed_integral.masked_fill_(done, 0.0)
@@ -292,8 +298,8 @@ def demo(env, options, ppo, live_view=None):
         if (i + 1) % round(1.0 / control_dt) == 0 or i + 1 == steps:
             yaw = (f" wz={ang_vel[0, 2].item():+.2f}rad/s yaw_target={yaw_cmd:+.2f}rad/s"
                    if options.keyboard or options.yaw else "")
-            height = (f" hL/hR={left * 100:.1f}/{right * 100:.1f}cm "
-                      f"ref={height_reference * 100:.1f}cm goal={height_request * 100:.1f}cm "
+            height = (f" body_height={body_height * 100:.1f}cm "
+                      f"ref={body_reference * 100:.1f}cm goal={(height_request + env.body_height_offset) * 100:.1f}cm "
                       f"pitch={extras['pitch_deg'][0].item():+.1f}deg"
                       if locomotion else "")
             print(f"t={seconds + control_dt:.2f}s x={x:+.3f}m z={position[2].item():.3f}m "
@@ -308,7 +314,7 @@ def demo(env, options, ppo, live_view=None):
           f"env 0 forward displacement {travelled:+.3f} m, both wheels in contact "
           f"for {wheel_contact_frames}/{steps} steps.")
     if locomotion:
-        print(f"Falls: {falls}; env 0 leg-height MAE: {100 * height_error / steps:.2f} cm; "
+        print(f"Falls: {falls}; env 0 body-height MAE: {100 * height_error / steps:.2f} cm; "
               f"leg torque saturation: {100 * saturated_steps / steps:.1f}% of steps")
         roll, fore_aft, height_gap = posture_max.tolist()
         print(f"Env 0 peaks: |roll| {roll:.2f} deg, |pitch| {pitch_peak.item():.2f} deg, "
@@ -335,6 +341,8 @@ def main():
     parser.add_argument("--speed", type=float, help="Demo forward speed in m/s (2.5 for native keyboard, 0.35 otherwise)")
     parser.add_argument("--yaw", type=float, default=0.0, help="Demo yaw-rate request in rad/s")
     heights = parser.add_mutually_exclusive_group()
+    heights.add_argument("--body-height", type=float, help="Demo base_link clearance above the ground in meters")
+    heights.add_argument("--body-height-sequence", type=float, nargs="+", help="Successive demo body clearances in meters")
     heights.add_argument("--height", type=float, help="Demo hip-to-wheel height in meters")
     heights.add_argument("--height-sequence", type=float, nargs="+", help="Successive demo leg-height targets in meters")
     parser.add_argument("--height-hold", type=float, default=2.0, help="Seconds between demo height targets")
@@ -356,9 +364,10 @@ def main():
     parser.add_argument("--iterations", type=int, default=12)
     parser.add_argument("--output", type=Path, help="New or empty directory for the PPO run")
     args = parser.parse_args()
+    body_heights = args.body_height_sequence or ([] if args.body_height is None else [args.body_height])
     if args.mode != "train" and (args.resume or args.init_checkpoint or args.forward_limit is not None):
         parser.error("--resume, --init-checkpoint and --forward-limit require train mode")
-    if args.mode == "train" and (args.viewer or args.video or args.checkpoint or args.height is not None
+    if args.mode == "train" and (args.viewer or args.video or args.checkpoint or args.height is not None or body_heights
                                  or args.height_sequence or args.surface or args.yaw):
         parser.error("Viewer, recording, checkpoint and manual geometry/command options require demo mode")
     if args.keyboard and (args.mode != "demo" or args.checkpoint is None):
@@ -377,7 +386,8 @@ def main():
     if not isfinite(args.height_hold) or args.height_hold <= 0:
         parser.error("--height-hold must be finite and positive")
     if args.seconds is None and not args.keyboard:
-        args.seconds = len(args.height_sequence) * args.height_hold if args.height_sequence else 5.0
+        sequence = args.body_height_sequence or args.height_sequence
+        args.seconds = len(sequence) * args.height_hold if sequence else 5.0
 
     checkpoint = args.resume or args.checkpoint or args.init_checkpoint
     run = {}
@@ -425,6 +435,8 @@ def main():
         low, high = locomotion["height_range"]
         if not locomotion["enabled"] or any(not low <= height <= high for height in requested_heights):
             parser.error(f"Height demo requires a locomotion checkpoint and targets in [{low:g}, {high:g}] m")
+    if body_heights and (not locomotion["enabled"] or any(not isfinite(height) for height in body_heights)):
+        parser.error("Body heights require a locomotion checkpoint and finite targets")
     if args.surface:
         surfaces = SCUT_V1_SURFACES if locomotion["terrain"] == "scut_v1" else SURFACES
         if not locomotion["enabled"] or locomotion["terrain"] == "plane" or args.surface not in surfaces:
@@ -489,6 +501,16 @@ def main():
         print(f"Building {num_envs} Genesis environments on {gs.device}...", flush=True)
         env = env_class(args.model, num_envs, viewer=args.viewer or local_training_view,
                         task_config=settings["task"], training_view_fps=training_view_fps)
+        if body_heights:
+            low = env.height_low + env.body_height_offset
+            high = env.height_high + env.body_height_offset
+            if any(height < low - 0.00005 or height > high + 0.00005 for height in body_heights):
+                parser.error(f"Body height targets must be in [{low:.4f}, {high:.4f}] m")
+            heights = [min(env.height_high, max(env.height_low, h - env.body_height_offset)) for h in body_heights]
+            if args.body_height_sequence:
+                args.height_sequence = heights
+            else:
+                args.height = heights[0]
         if local_training_view:
             from tools.viewer_drive import ViewerFollow
 

@@ -45,7 +45,9 @@ def _validate_range(settings, name):
 def _validate_scut_reward(reward):
     divisors = {
         "tracking": {"forward_error_width", "yaw_error_width", "pitch_width", "roll_width",
-                     "tilt_speed_width", "height_error_width"},
+                     "tilt_speed_width", "height_error_width", "ground_pitch_error_scale", "ground_pitch_rate_scale",
+                     "flat_roll_error_scale", "flat_roll_rate_scale"},
+        "braking": {"pitch_rate_scale", "recovery_pitch_scale", "recovery_speed_scale", "distance_scale"},
         "airborne": {"wheel_torque_scale", "wheel_speed_scale", "centering_width"},
     }
     for section, settings in reward.items():
@@ -61,6 +63,9 @@ def _validate_scut_reward(reward):
     if airborne["post_contact_end_seconds"] < airborne["wheel_contact_transition_seconds"]:
         raise ValueError("task.scut_rough_reward.airborne.post_contact_end_seconds must not precede "
                          "wheel_contact_transition_seconds")
+    braking = reward["braking"]
+    if braking["enabled"] and braking["start_speed"] <= braking["zero_speed"]:
+        raise ValueError("Braking start_speed must exceed zero_speed")
 
 
 def _validate_settings(settings):
@@ -77,6 +82,11 @@ def _validate_settings(settings):
             raise ValueError(f"task.observation_noise.{name} must be finite and nonnegative")
 
     locomotion = task["locomotion"]
+    if task["scut_rough_reward"]["braking"]["enabled"] and not locomotion["enabled"]:
+        raise ValueError("The braking reward requires enabled locomotion")
+    tracking = task["scut_rough_reward"]["tracking"]
+    if (tracking["flat_roll_error_weight"] or tracking["flat_roll_rate_weight"]) and not locomotion["enabled"]:
+        raise ValueError("The flat-specific roll reward requires enabled locomotion")
     leg_torque_limit = locomotion["leg_torque_limit"]
     if not isfinite(leg_torque_limit) or leg_torque_limit <= 0:
         raise ValueError("task.locomotion.leg_torque_limit must be finite and positive")
@@ -102,6 +112,8 @@ def _validate_settings(settings):
         raise ValueError("Use a positive command period and a height_rate within 0–1.2 m/s")
     if not isfinite(locomotion["height_acceleration"]) or locomotion["height_acceleration"] < 0:
         raise ValueError("height_acceleration must be finite and nonnegative")
+    if not 0 < locomotion["manual_forward_acceleration"] <= MAX_FORWARD_ACCELERATION:
+        raise ValueError(f"manual_forward_acceleration must be in (0, {MAX_FORWARD_ACCELERATION:g}] m/s²")
     if locomotion["braking_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
         raise ValueError("braking_maneuvers requires enabled locomotion and speed_maneuvers")
     if locomotion["launch_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
@@ -131,15 +143,28 @@ def _validate_settings(settings):
             type(value) not in (int, float) or not isfinite(value) or value < 0 for value in weights
         ) or not any(weights)):
             raise ValueError(f"{name} requires {length} nonnegative weights with a positive sum")
-    if locomotion["terrain"] not in ("plane", "mixed", "scut_v1"):
-        raise ValueError("terrain must be plane, mixed or scut_v1")
-    has_terrain = locomotion["terrain"] != "plane"
+    terrain = locomotion["terrain"]
+    if terrain not in ("plane", "mixed", "scut_v1", "scut_ground"):
+        raise ValueError("terrain must be plane, mixed, scut_v1 or scut_ground")
+    has_terrain = terrain != "plane"
     if locomotion["terrain_traversal"] and not (locomotion["enabled"] and has_terrain):
         raise ValueError("terrain_traversal requires enabled terrain locomotion")
-    if locomotion["terrain"] == "scut_v1" and not locomotion["terrain_traversal"]:
-        raise ValueError("scut_v1 requires terrain_traversal")
+    terrain_limit = locomotion["terrain_forward_limit"]
+    if not 0 <= terrain_limit <= MAX_FORWARD_SPEED or (terrain_limit and not locomotion["terrain_traversal"]):
+        raise ValueError("terrain_forward_limit requires terrain_traversal and a speed within the chassis range")
+    if terrain in ("scut_v1", "scut_ground") and not locomotion["terrain_traversal"]:
+        raise ValueError(f"{terrain} requires terrain_traversal")
+    scale = locomotion["scut_ground_scale"]
+    if not 0.50 <= scale <= 1.0 or (scale != 1.0 and terrain != "scut_ground"):
+        raise ValueError("scut_ground_scale must be in [0.50, 1.0] and is only adjustable on scut_ground")
+    bars_fraction = locomotion["scut_ground_bars_fraction"]
+    bars_reverse = locomotion["scut_ground_bars_reverse_probability"]
+    if not 0.0 <= bars_fraction <= 0.60 or not 0.0 <= bars_reverse <= 1.0:
+        raise ValueError("scut_ground bars fraction must be in [0, 0.60] and reverse probability in [0, 1]")
+    if (bars_fraction != 0.10 or bars_reverse != 0.50) and terrain != "scut_ground":
+        raise ValueError("The scut_ground bars sampling settings require scut_ground terrain")
     drops = locomotion["cliff_drop_heights"]
-    if drops and (locomotion["terrain"] != "scut_v1" or len(drops) != 3
+    if drops and (terrain != "scut_v1" or len(drops) != 3
                   or any(type(drop) not in (int, float) or not 0.04 <= drop <= 0.40 for drop in drops)
                   or not drops[0] < drops[1] < drops[2]
                   or locomotion["height_range"][1] < 0.23):

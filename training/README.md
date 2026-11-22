@@ -52,17 +52,13 @@ TensorBoard 记录 `Episode/body_height_mae_cm`、`Episode/forward_mae_m_s`、`E
 
 ```powershell
 uv run --locked main.py train --config configs/v02_speed.toml --init-checkpoint outputs/v02_low/model_999.pt --forward-limit 1.0 --num-envs 1024 --iterations 600 --output outputs/v02_speed_1
-uv run --locked main.py train --config configs/v02_rough.toml --init-checkpoint outputs/v02_speed_1/model_599.pt --num-envs 1024 --iterations 1000 --output outputs/v02_rough --live-port 6007
-uv run --locked main.py demo --checkpoint outputs/v02_rough/model_999.pt --surface bars --terrain-seed 101 --num-envs 1 --seconds 10 --speed 0.35 --height-sequence 0.17 0.20 0.185 0.17
 ```
 
 `v02_speed` 保留 10% 的驻车回合。其余平地回合按 7% 常规随机、15% 直线启停与反向、7% 原地快转、13% 连续转弯、11% 入弯后制动、22% 松键再起步、25% 专项升降采样。速度工况在回合内保持腿高，初始腿高覆盖 17–33 cm。专项升降在静止或 ±0.50 m/s 匀速直行时交替升高、降低。按住时长从 0.26、0.70、1.70 s 中选择，零速指令保持 0.22、0.50 或 1.10 s 后再起步，同时采样同向连按与反向起步。快速转向请求上限为 ±4 rad/s。
 
 平地默认线速度档位为 0.8、1.2、1.6 m/s，超过当前速度上限的采样会截断。扩展高速档时，增加 `command_speed_levels` 并用 `--forward-limit` 设置对应上限。线加减速度上限按回合以 35%、45%、20% 的概率选 1、2、4 m/s²。偏航角加速度上限为 24 rad/s²，轮速和底盘摩擦圆会进一步限制组合指令。`v02_speed` 的高度参考限速 0.30 m/s、限加速度 0.90 m/s²。
 
-回放分别测启停与升降。TensorBoard 记录回合平均误差及 pitch、roll 峰值。`v02_rough` 的平地回合继续采样同样的松键时长。
-
-地形采样包含 40% 平地、25% 上下坡、20% 随机起伏、15% 凸条和低阶梯。通过 `--surface flat|slope|rough|bars|stairs` 选择回放地形，用训练未见的 `--terrain-seed` 验证。正、负 `--speed` 分别检验同一条坡或阶梯的两个方向。按实际越过的障碍、跌倒和过障后速度恢复评估效果。高度范围可在 TOML 的 `task.locomotion.height_range` 内逐步扩大，允许的配置范围为 17–33 cm。程序会在启动时校验闭链姿态，扩展档位还需验证承重和力矩余量。
+回放分别测启停与升降。TensorBoard 记录回合平均误差及 pitch、roll 峰值。
 
 ### 从低腿高扩展到高腿高
 
@@ -77,7 +73,20 @@ uv run --locked main.py demo --checkpoint outputs/v02_height_33_40nm/model_599.p
 
 华南虎 V14 Rough-v1 的防劈叉项按车体系轮心前后差计罚，超过 5 cm 时追加固定惩罚。动作平滑项包括一阶和二阶动作差分以及关节速度和加速度，腿和轮分别计权。TensorBoard 的 `leg_fore_aft_gap_cm` 记录轮心相对同侧髋中心的前后投影差。
 
-`v02_rough` 沿用 17–33 cm 腿高和 ±40 N·m 腿部限矩，速度请求为 ±0.8 m/s。坡度为 3–6°，随机起伏高度在 ±6 mm 内，凸条和单级台阶高 6–12 mm。每个非平地回合随机选择一个行驶方向，并沿同方向持续采样 0.52–0.80 m/s 的纵向速度请求，让机器人驶离平坦起点并越过连续障碍。平地回合保留随机速度和转向指令。TensorBoard 的 `Episode/terrain_progress_m` 记录车体在赛道纵向走过的最大距离。
+### 华南虎贴地跑场
+
+用 [v02_scut_ground.toml](configs/v02_scut_ground.toml) 训练一个 policy。地形以华南虎 V14 Rough-v1 的跑场形状为参考，包含平地、凸坡、凹坡、随机粗糙面、交叉凸条、连续凸阶和两类凹阶。非平地以 55%、30%、15% 的概率抽取三档难度，从赛道两端出发直行，速度请求为 0.52–0.80 m/s。当前阶段的地形均为贴地通过。
+
+平地占 40%，赛道约 24 m 长，保留驻车、缓起缓停、重复启停、快转和升降。训练腿高覆盖 17–33 cm，回合内连续调整。当前配置将凸条回合提高到 18%，其中 75% 倒车通过，其余非平地按原比例缩放。平地接地时额外惩罚横滚误差和横滚角速度。
+
+```powershell
+uv run --locked main.py train --config configs/v02_scut_ground.toml --resume outputs/v02_scut_ground_065_20261123_031406/artifacts/model_499.pt --backend cuda --num-envs 4096 --iterations 500 --output outputs/v02_scut_ground_065_focus --live-port 6013 --live-stream --live-fps 8
+uv run --locked main.py demo --checkpoint outputs/v02_scut_ground_065_focus/model_999.pt --surface bars --terrain-variant 3 --terrain-seed 101 --num-envs 1 --seconds 13 --speed -0.70 --height 0.20 --viewer
+```
+
+先验证 `scut_ground_scale = 0.65`，再根据结果分阶段提高到 `0.80` 和 `1.00`。每阶段从上一阶段通过验证的检查点初始化，使用独立输出目录以保留配置快照。回放逐地形按 1–3 档、两方向、17/20/33 cm 验证，确认确实穿过障碍，并记录倒地、pitch、roll、速度恢复和限矩。随机路面用不同种子复测。平地单独回归驻车、快转、升降和 1.6 m/s 启停。地形效果稳定后，再单独加入地面摩擦、载荷、关节摩擦和观测噪声的随机化。
+
+`--surface` 可选 `flat`、`slope`、`inv_slope`、`rough`、`bars`、`stairs`、`inv_stairs_low`、`inv_stairs_high`。通过 `--terrain-variant` 选择难度，正负 `--speed` 检查两个方向。TensorBoard 的 `Episode/terrain_progress_m` 记录车体相对出生点的最大纵向位移。
 
 ## 旧平地 PPO 短训与回放
 

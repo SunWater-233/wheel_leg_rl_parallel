@@ -2,14 +2,68 @@
 
 import torch
 from genesis.utils.geom import inv_transform_by_quat
+from torch.nn.functional import smooth_l1_loss
 
 CONTACT_TIME_TOLERANCE = 1e-6
+
+
+class BrakingPitchCost:
+    """Track commanded stops through the speed ramp and the subsequent recovery."""
+
+    def __init__(self, commands, settings, dt):
+        self.settings = settings
+        self.dt = dt
+        self.previous_forward = torch.zeros_like(commands[:, 0])
+        self.direction = torch.zeros_like(self.previous_forward)
+        self.recovery_elapsed = torch.zeros_like(self.previous_forward)
+        self.distance_error = torch.zeros_like(self.previous_forward)
+
+    def reset(self, ids):
+        self.previous_forward[ids] = 0.0
+        self.direction[ids] = 0.0
+        self.recovery_elapsed[ids] = 0.0
+        self.distance_error[ids] = 0.0
+
+    def __call__(self, forward, goal, measured_forward, pitch_projection, pitch_rate, eligible):
+        cfg = self.settings
+        reference_speed = forward.abs()
+        previous_speed = self.previous_forward.abs()
+        stop_requested = eligible & (goal.abs() <= cfg["zero_speed"])
+        start = (stop_requested & (self.direction == 0.0) & (previous_speed >= cfg["start_speed"])
+                 & (reference_speed < previous_speed))
+        direction = torch.where(start, self.previous_forward.sign(), self.direction)
+        direction = direction.masked_fill(~stop_requested, 0.0)
+        self.previous_forward.copy_(forward)
+
+        recovering = (direction != 0.0) & (reference_speed <= cfg["zero_speed"])
+        self.recovery_elapsed.copy_(torch.where(recovering, self.recovery_elapsed + self.dt, 0.0))
+        active = (direction != 0.0) & (self.recovery_elapsed <= cfg["recovery_seconds"])
+        self.direction.copy_(direction.masked_fill(~active, 0.0))
+
+        # Integrate travel along the commanded braking direction against the slew-limited reference.
+        measured_speed = (measured_forward * direction).clamp_min(0.0)
+        distance_step = (measured_speed - reference_speed) * self.dt
+        self.distance_error.copy_(torch.where(active, self.distance_error + distance_step, 0.0))
+        excess_distance = (self.distance_error - cfg["distance_tolerance"]).clamp_min(0.0)
+        zero = torch.zeros_like(forward)
+        rate_cost = smooth_l1_loss(pitch_rate / cfg["pitch_rate_scale"], zero, reduction="none")
+        pitch_cost = smooth_l1_loss(pitch_projection / cfg["recovery_pitch_scale"], zero, reduction="none")
+        speed_cost = smooth_l1_loss(measured_forward / cfg["recovery_speed_scale"], zero, reduction="none")
+        distance_cost = smooth_l1_loss(excess_distance / cfg["distance_scale"], zero, reduction="none")
+        recovery_cost = cfg["recovery_pitch_weight"] * pitch_cost + cfg["recovery_speed_weight"] * speed_cost
+        return active * (
+            cfg["pitch_rate_weight"] * rate_cost
+            + recovering * recovery_cost
+            + cfg["distance_weight"] * distance_cost
+        )
 
 
 class ScutRoughReward:
     def __init__(self, env, *, airborne_minimum_height=None):
         self.env = env
         self.settings = env.cfg["scut_rough_reward"]
+        braking = self.settings["braking"]
+        self.braking_cost = BrakingPitchCost(env.commands, braking, env.control_dt) if braking["enabled"] else None
         self.previous_actions = torch.zeros_like(env.last_actions)
         self.previous_joint_velocity = torch.zeros_like(env.last_actions)
         self.nonwheel_links = [i for i in range(env.robot.n_links) if i not in env.wheel_links]
@@ -30,6 +84,8 @@ class ScutRoughReward:
             self.scanner_offsets = torch.cat((xy, torch.zeros_like(xy[:, :1])), dim=1)
 
     def reset(self, ids):
+        if self.braking_cost is not None:
+            self.braking_cost.reset(ids)
         self.previous_actions[ids] = 0.0
         self.previous_joint_velocity[ids] = 0.0
         if self.minimum_body_clearance is not None:
@@ -151,7 +207,8 @@ class ScutRoughReward:
         forward_target = forward.masked_fill(stand, 0.0)
         yaw_target = yaw.masked_fill(yaw.abs() < tracking["yaw_deadband"], 0.0)
         gx, gy = gravity[:, :2].unbind(dim=1)
-        forward_error = forward_target - lin_vel[:, 0] * gravity[:, 1:].norm(dim=1)
+        measured_forward = lin_vel[:, 0] * gravity[:, 1:].norm(dim=1)
+        forward_error = forward_target - measured_forward
         yaw_error = yaw_target - ang_vel[:, 2]
         height_error = env.body_clearance - (env.commands[:, 2] + env.body_height_offset)
         forward_clip = tracking["forward_error_clip"]
@@ -161,7 +218,22 @@ class ScutRoughReward:
             -forward.square() / tracking["tilt_speed_width"]
         )
         pitch_cost = tracking["pitch_penalty_weight"] * (~airborne) * (tilt_scale * gx).square()
+        if tracking["ground_pitch_error_weight"] or tracking["ground_pitch_rate_weight"]:
+            pitch_rate = ang_vel[:, 1]
+            zero = torch.zeros_like(gx)
+            # Resolve small errors near level while retaining a gradient through large excursions.
+            angle_error = smooth_l1_loss(gx / tracking["ground_pitch_error_scale"], zero, reduction="none")
+            rate_error = smooth_l1_loss(pitch_rate / tracking["ground_pitch_rate_scale"], zero, reduction="none")
+            pitch_cost += (~airborne) * (tracking["ground_pitch_error_weight"] * angle_error
+                                         + tracking["ground_pitch_rate_weight"] * rate_error)
         roll_cost = tracking["roll_penalty_weight"] * (tilt_scale * gy).square()
+        if tracking["flat_roll_error_weight"] or tracking["flat_roll_rate_weight"]:
+            flat_grounded = (env.surface == 0) & ~airborne
+            zero = torch.zeros_like(gy)
+            angle_error = smooth_l1_loss(gy / tracking["flat_roll_error_scale"], zero, reduction="none")
+            rate_error = smooth_l1_loss(ang_vel[:, 0] / tracking["flat_roll_rate_scale"], zero, reduction="none")
+            roll_cost += flat_grounded * (tracking["flat_roll_error_weight"] * angle_error
+                                          + tracking["flat_roll_rate_weight"] * rate_error)
 
         tracking_reward = (
             tracking["forward_reward_weight"]
@@ -192,6 +264,9 @@ class ScutRoughReward:
             + fall_weight * fallen
         )
         reward = tracking_reward - regularization_cost
+        if self.braking_cost is not None:
+            eligible = (env.surface == 0) & ~airborne & ~fallen
+            reward -= self.braking_cost(forward, env.goals[:, 0], measured_forward, gx, ang_vel[:, 1], eligible)
         if self.minimum_body_clearance is None:
             return reward
         offsets = wheels - env.robot.get_pos()[:, None]

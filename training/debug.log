@@ -22,3 +22,28 @@
 [22164:28180:1122/221118.084:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:11
 [22164:28180:1122/221121.447:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
 [22164:28180:1122/221123.432:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012645.684:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.v12.filemap.sogouime
+[17712:11536:1123/012645.684:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:1
+[17712:11536:1123/012645.684:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:12
+[17712:11536:1123/012645.734:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi120.v12.filemap.sogouime
+[17712:11536:1123/012645.734:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:12
+[17712:11536:1123/012645.735:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:12
+[17712:11536:1123/012703.986:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012703.992:WARNING:t_skinfilemap.cpp(61)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.Dpi120.v13.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.Dpi120.v13.filemap.sogouime5813547f6b7
+[17712:11536:1123/012703.992:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:12
+[17712:11536:1123/012703.992:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:13
+[17712:11536:1123/012723.341:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012724.338:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012725.602:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012727.226:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012727.612:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012727.945:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012730.150:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012730.442:WARNING:generation_candidate_helper.cpp(113)] [GenerationResult] stale, skip UI refresh: total_elapsed_ms=255 threshold_ms=200 session_id=33622792
+[17712:11536:1123/012730.442:WARNING:generation_candidate_helper.cpp(113)] [GenerationResult] stale, skip UI refresh: total_elapsed_ms=243 threshold_ms=200 session_id=33622792
+[17712:11536:1123/012731.777:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012733.779:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012735.300:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012738.540:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[17712:11536:1123/012739.211:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0

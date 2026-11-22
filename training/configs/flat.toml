@@ -1,165 +1,224 @@
 [task]
-episode_seconds = 20.0
-friction = 0.8
-forward_command = [-0.5, 0.5] # m/s
-yaw_command = [-0.5, 0.5] # rad/s
+episode_seconds = 20.0        # 单个训练回合的最长时间，单位为秒
+friction = 0.8                # 地面接触摩擦系数
+forward_command = [-0.5, 0.5] # 纵向速度指令范围，单位为米/秒，负值表示后退
+yaw_command = [-0.5, 0.5]     # 车身转向角速度指令范围，单位为弧度/秒
 
-# Defaults for the SCUT V14 Rough-v1 reward used by Genesis.
+# 华南虎 V14 Rough-v1 奖励默认值。各实验的 TOML 可以覆盖下面的任意参数。
+# 跟踪指令和保持车身姿态。指数奖励在误差为零时最大，宽度越大，奖励随误差下降得越慢。
 [task.scut_rough_reward.tracking]
-forward_deadband = 0.1 # m/s
-yaw_deadband = 0.1 # rad/s
-forward_reward_weight = 1.25
-forward_error_clip = 1.0 # m/s, for the exponential term
-forward_error_width = 0.5 # denominator of the exponential term
-forward_error_scale = 0.25 # applied to the error before squaring
-yaw_reward_weight = 1.0
-yaw_error_clip = 0.8 # rad/s, for the exponential term
-yaw_error_width = 0.25
-yaw_error_scale = 0.5
-standing_drift_weight = 1.0 # horizontal speed penalty at zero forward command
-pitch_reward_weight = 1.0 # exponential reward on projected gravity X
-pitch_width = 0.02
-roll_reward_weight = 1.0 # exponential reward on projected gravity Y
-roll_width = 0.01
-tilt_base_scale = 2.0 # base error scale before squaring
-tilt_low_speed_scale = 2.0 # additional error scale near zero forward command
-tilt_speed_width = 3.0 # denominator of the speed-dependent exponential
-pitch_penalty_weight = 2.0 # quadratic pitch penalty outside the airborne phase
-roll_penalty_weight = 2.0 # quadratic roll penalty on the ground and in the air
-height_reward_weight = 1.0
-height_error_clip = 0.15 # m, for the exponential term
-height_error_width = 0.001
-height_error_scale = 10.0 # applied before squaring, outside the airborne phase
+forward_deadband = 0.1       # 纵向速度指令的绝对值小于此值时，按零速跟踪，单位为米/秒
+yaw_deadband = 0.1           # 转向角速度指令的绝对值小于此值时，按零转速跟踪，单位为弧度/秒
+forward_reward_weight = 1.25 # 纵向速度跟踪的指数奖励权重
+forward_error_clip = 1.0     # 计算指数奖励时，纵向速度误差的绝对值最多按此值计，单位为米/秒
+forward_error_width = 0.5    # 纵向速度跟踪的指数奖励宽度
+forward_error_scale = 0.25   # 纵向速度误差先乘此值再平方扣分
+yaw_reward_weight = 1.0      # 转向角速度跟踪的指数奖励权重
+yaw_error_clip = 0.8         # 计算指数奖励时，转向角速度误差的绝对值最多按此值计，单位为弧度/秒
+yaw_error_width = 0.25       # 转向角速度跟踪的指数奖励宽度
+yaw_error_scale = 0.5        # 转向角速度误差先乘此值再平方扣分
+standing_drift_weight = 1.0  # 纵向速度指令按零速跟踪时，惩罚车身在水平面上漂移
+pitch_reward_weight = 1.0    # 车身少点头或仰头时得到的指数奖励权重
+pitch_width = 0.02           # 俯仰指数奖励的宽度，以车身坐标系中的重力前后分量衡量
+roll_reward_weight = 1.0     # 车身少向左右倾斜时得到的指数奖励权重
+roll_width = 0.01            # 横滚指数奖励的宽度，以车身坐标系中的重力左右分量衡量
+tilt_base_scale = 2.0        # 俯仰和横滚误差平方前的基础倍率
+tilt_low_speed_scale = 2.0   # 纵向速度指令接近零时，姿态误差倍率额外增加的量
+tilt_speed_width = 3.0       # 越大，额外的姿态惩罚在更高的纵向速度指令下仍然较强
+pitch_penalty_weight = 2.0   # 地面俯仰平方惩罚的权重。越大，越倾向抑制点头和仰头
+ground_pitch_error_scale = 0.02618 # 车身前向重力投影的归一化尺度，约 1.5°
+ground_pitch_error_weight = 0.0   # 地面俯仰误差惩罚，权重为 0 时关闭
+ground_pitch_rate_scale = 0.25    # 地面俯仰角速度的归一化尺度，单位为弧度/秒
+ground_pitch_rate_weight = 0.0    # 地面俯仰角速度惩罚，权重为 0 时关闭
+roll_penalty_weight = 2.0    # 横滚平方惩罚的权重，地面和腾空时都生效
+flat_roll_error_scale = 0.02618  # 平地横滚误差的归一化尺度，约 1.5°
+flat_roll_error_weight = 0.0    # 平地接地时额外的横滚误差惩罚
+flat_roll_rate_scale = 0.25     # 平地横滚角速度的归一化尺度，单位为弧度/秒
+flat_roll_rate_weight = 0.0     # 平地接地时额外的横滚角速度惩罚
+height_reward_weight = 1.0   # 车身离地高度跟踪的指数奖励权重
+height_error_clip = 0.15     # 计算指数奖励时，高度误差的绝对值最多按此值计，单位为米
+height_error_width = 0.001   # 车身高度跟踪的指数奖励宽度
+height_error_scale = 10.0    # 地面高度误差先乘此值再平方扣分
 
+# 抑制动作抖动、过快的关节运动和左右轮前后错位。
 [task.scut_rough_reward.motion]
-action_delta_weight = 0.002 # first difference of all policy actions
-leg_action_curvature_weight = 0.005 # second difference of leg actions
-wheel_action_curvature_weight = 0.001 # second difference of wheel actions
-leg_acceleration_weight = 1e-7
-wheel_acceleration_weight = 2e-9
-leg_velocity_weight = 1e-3
-wheel_velocity_weight = 2e-6
-wheel_gap_threshold = 0.05 # m, fore-aft wheel-center separation in the body frame
-wheel_gap_threshold_weight = 1.0 # fixed penalty when the wheel gap exceeds the threshold
-wheel_gap_scale = 5.0 # 1/m, applied before squaring
+action_delta_weight = 0.002           # 惩罚相邻两步动作指令的变化
+leg_action_curvature_weight = 0.005   # 惩罚腿部动作指令的变化幅度忽大忽小或反复变向
+wheel_action_curvature_weight = 0.001 # 惩罚轮子动作指令的变化幅度忽大忽小或反复变向
+leg_acceleration_weight = 1e-7        # 腿部关节加速度平方惩罚的权重
+wheel_acceleration_weight = 2e-9      # 轮子角加速度平方惩罚的权重
+leg_velocity_weight = 1e-3            # 腿部关节速度平方惩罚的权重
+wheel_velocity_weight = 2e-6          # 轮子角速度平方惩罚的权重
+wheel_gap_threshold = 0.05            # 左右轮心沿车身前后方向的错位阈值，单位为米
+wheel_gap_threshold_weight = 1.0      # 轮心错位超过阈值时追加的固定扣分
+wheel_gap_scale = 5.0                 # 轮心错位距离先乘此值再平方扣分，单位为米的倒数
 
+# 控制用力和功耗，惩罚车身晃动、碰撞及倒地。
 [task.scut_rough_reward.regularization]
-torque_weight = 1e-5 # squared actuator torque
-wheel_power_weight = 1e-5 # positive mechanical wheel power
-vertical_velocity_weight = 0.5
-body_angular_velocity_weight = 0.05 # roll and pitch rates
-nonwheel_contact_force_threshold = 3.0 # N
-nonwheel_contact_weight = 2.0
-airborne_nonwheel_contact_extra_weight = 48.0
-fall_weight = 200.0
-airborne_fall_extra_weight = 1000.0
+torque_weight = 1e-5                          # 所有执行器力矩平方惩罚的权重
+wheel_power_weight = 1e-5                     # 各轮输出的正机械功率相加后扣分，此项控制扣分权重
+vertical_velocity_weight = 0.5                # 车身上下运动速度的平方惩罚权重
+body_angular_velocity_weight = 0.05           # 车身俯仰和横滚角速度的平方惩罚权重
+nonwheel_contact_force_threshold = 3.0        # 非轮子部件的接触力超过此值时计为碰撞，单位为牛
+nonwheel_contact_weight = 2.0                 # 检测到非轮子部件碰撞时的扣分
+airborne_nonwheel_contact_extra_weight = 48.0 # 腾空阶段检测到同类碰撞时的额外扣分
+fall_weight = 200.0                           # 环境判定倒地时的扣分
+airborne_fall_extra_weight = 1000.0           # 腾空阶段被判定倒地时的额外扣分
+
+# 腾空和接地的判定条件，以及对应阶段的奖惩。
+# 限速参考开始向零减速时触发，适用于平地连续腿高任务。
+[task.scut_rough_reward.braking]
+enabled = false
+start_speed = 0.15          # 开始制动所需的最小参考速度，m/s
+zero_speed = 0.04           # 判定停止指令和零速参考的阈值，m/s
+recovery_seconds = 0.75     # 参考到零后的回正窗口，s
+pitch_rate_scale = 0.45     # 俯仰角速度归一化尺度，rad/s
+pitch_rate_weight = 0.50    # 制动及回正期间的角速度惩罚
+recovery_pitch_scale = 0.0523 # 车身前向重力投影归一化尺度，约 3°
+recovery_pitch_weight = 0.80
+recovery_speed_scale = 0.12    # 回正期间实际纵向速度的归一化尺度，m/s
+recovery_speed_weight = 0.0
+distance_tolerance = 0.05   # 实际制动距离相对参考允许多走的距离，m
+distance_scale = 0.15       # 超出容差的距离归一化尺度，m
+distance_weight = 0.60
 
 [task.scut_rough_reward.airborne]
-body_clearance_scan_radius = 0.01 # m, half-width of the 3-by-3 ground-height sample grid
-knee_margin_fraction = 0.03 # soft-limit margin at each end of the knee travel
-body_clearance_margin = 0.08 # m above the minimum stance clearance to detect liftoff
-wheel_clearance_threshold = 0.08 # m from each tire to the ground to detect liftoff
-liftoff_wheel_force_threshold = 1.0 # N, both wheels must be below this force
-landing_wheel_force_threshold = 20.0 # N to count a wheel contact
-landing_wheel_center_height = 0.15 # m, wheel-center height limit for counting contact
-body_contact_force_threshold = 5.0 # N to count contact of a body link
-wheel_contact_end_seconds = 0.30 # sustained wheel contact that ends the airborne phase
-body_contact_end_seconds = 0.25 # sustained body contact that ends the airborne phase
-max_airborne_seconds = 1.0
-wheel_contact_transition_seconds = 0.02 # boundary between pre-contact and landing rewards
-post_contact_end_seconds = 0.05 # end of the landing wheel-speed penalty window
-body_contact_centering_seconds = 0.02 # body contact limit for the centering reward
-wheel_torque_scale = 1.5 # N·m, divisor in the low-torque exponential reward
-progress_speed_threshold = 1.0 # m/s, both commanded and measured speed
-wheel_speed_scale = 10.0 # rad/s, wheel speed corresponding to full progress
-centering_width = 0.02 # denominator of the wheel-centering exponential
-low_torque_reward_weight = 20.0
-wheel_progress_reward_weight = 10.0
-landing_wheel_progress_penalty_weight = 10.0
-centering_reward_weight = 10.0
-knee_overrun_weight = 10.0
+body_clearance_scan_radius = 0.01            # 取车身下方九个点估算地面高度，采样网格的半宽，单位为米
+knee_margin_fraction = 0.03                  # 膝关节行程两端各留出的软限位比例，超过软限位就扣分
+body_clearance_margin = 0.08                 # 判定腾空时，车身比最低站姿额外高出的距离门槛，单位为米
+wheel_clearance_threshold = 0.08             # 判定腾空时，两个轮胎都要离地超过的距离，单位为米
+liftoff_wheel_force_threshold = 1.0          # 判定腾空时，两轮接触力都要低于此值，单位为牛
+landing_wheel_force_threshold = 20.0         # 单轮接触力要超过此值，才可能算作接地，单位为牛
+landing_wheel_center_height = 0.15           # 同时要求该轮轮心低于这个离地高度，单位为米
+body_contact_force_threshold = 5.0           # 任一机身部件接触力超过此值时开始计时，单位为牛
+wheel_contact_end_seconds = 0.30             # 任一轮持续接地达到此时长后结束腾空阶段，单位为秒
+body_contact_end_seconds = 0.25              # 机身持续接触达到此时长后结束腾空阶段，单位为秒
+max_airborne_seconds = 1.0                   # 腾空阶段的超时阈值，单位为秒
+wheel_contact_transition_seconds = 0.02      # 车轮持续接地达到此时长后，从空中奖励切到落地轮速惩罚，单位为秒
+post_contact_end_seconds = 0.05              # 车轮持续接地达到此时长后，结束落地轮速惩罚，单位为秒
+body_contact_centering_seconds = 0.02        # 机身持续接触达到此时长后，停止轮心对中奖励，单位为秒
+wheel_torque_scale = 1.5                     # 空中低力矩奖励的尺度，越大越能容忍较高的轮端力矩，单位为牛·米
+progress_speed_threshold = 1.0               # 指令速度和沿指令方向的实际速度都须超过此值，才计入轮速奖惩，单位为米/秒
+wheel_speed_scale = 10.0                     # 两轮沿指令方向达到满分所需的轮速，单位为弧度/秒
+centering_width = 0.02                       # 轮心对中奖励的宽度，越大越能容忍轮心前后偏移
+low_torque_reward_weight = 20.0              # 腾空时保持轮端低力矩的奖励权重
+wheel_progress_reward_weight = 10.0          # 腾空时两轮沿行驶方向转动的奖励权重
+landing_wheel_progress_penalty_weight = 10.0 # 刚落地时轮速不足的惩罚权重
+centering_reward_weight = 10.0               # 空中轮心在车身下方、前后偏移小时的奖励权重
+knee_overrun_weight = 10.0                   # 腾空时膝关节超出软限位的惩罚权重
 
+# 在并行环境中改变物理参数，让策略适应摩擦、负载和阻尼的差异。
 [task.domain_randomization]
-enabled = false
-nominal_probability = 0.25
-contact_friction = [0.50, 0.65, 0.80, 0.95]
-body_mass_scale = [0.95, 1.10]
-# Load positions in meters relative to the nominal base COM, in the base frame.
-load_offsets = [[-0.12, 0.0, 0.0], [0.05, -0.025, 0.10], [0.05, 0.025, 0.10]]
+enabled = false # 是否启用物理参数随机化
+nominal_probability = 0.25 # 启用随机化后，仍使用标称物理参数的环境比例
+contact_friction = [0.50, 0.65, 0.80, 0.95] # 随机抽取的接触摩擦系数档位
+body_mass_scale = [0.95, 1.10] # 车身质量相对标称值的倍率范围
+load_offsets = [
+    [
+        -0.12,
+        0.0,
+        0.0,
+    ],
+    [
+        0.05,
+        -0.025,
+        0.10,
+    ],
+    [
+        0.05,
+        0.025,
+        0.10,
+    ],
+] # 负载相对车身标称质心的位置，按车身坐标系的前后、左右、上下排列，单位为米
 
-# Bounds are additive. Revolute groups use N·m and N·m·s/rad, sliders use N and N·s/m.
+# 以下范围是加到模型原有参数上的变化量。旋转关节的摩擦和阻尼单位分别为牛·米和牛·米·秒/弧度。
+# 直线滑动关节的对应单位为牛和牛·秒/米。
+# 髋关节
 [task.domain_randomization.hips]
-frictionloss_delta = [0.0, 0.15]
-damping_delta = [0.0, 0.06]
+frictionloss_delta = [0.0, 0.15] # 摩擦变化量范围
+damping_delta = [0.0, 0.06]      # 阻尼变化量范围
 
+# 被动关节
 [task.domain_randomization.passive]
-frictionloss_delta = [0.0, 0.03]
-damping_delta = [-0.008, 0.008]
+frictionloss_delta = [0.0, 0.03] # 摩擦变化量范围
+damping_delta = [-0.008, 0.008]  # 阻尼变化量范围
 
+# 弹簧滑动关节
 [task.domain_randomization.springs]
-frictionloss_delta = [0.0, 1.20]
-damping_delta = [-1.0, 1.0]
+frictionloss_delta = [0.0, 1.20] # 摩擦变化量范围
+damping_delta = [-1.0, 1.0]      # 阻尼变化量范围
 
+# 轮轴
 [task.domain_randomization.wheels]
-frictionloss_delta = [0.0, 0.05]
-damping_delta = [0.0, 0.02]
+frictionloss_delta = [0.0, 0.05] # 摩擦变化量范围
+damping_delta = [0.0, 0.02]      # 阻尼变化量范围
 
+# 加到策略观测上的噪声标准差，填 0 表示该项没有噪声。
 [task.observation_noise]
-gyro = 0.0 # rad/s standard deviation for actor inputs
-gravity = 0.0 # standard deviation for components of the projected gravity vector
-joint_position = 0.0 # rad
-joint_velocity = 0.0 # rad/s, before observation scaling
+gyro = 0.0           # 陀螺仪角速度，单位为弧度/秒
+gravity = 0.0        # 重力方向在车身坐标系中的各个分量
+joint_position = 0.0 # 关节角度，单位为弧度
+joint_velocity = 0.0 # 关节角速度，单位为弧度/秒，在观测缩放前加噪声
 
+# 连续腿高任务的指令、训练动作和地形。
 [task.locomotion]
-enabled = false
-leg_torque_limit = 12.0 # N·m per active leg joint
-height_range = [0.17, 0.20] # hip-to-wheel vertical projection, m
-height_lowering_schedule = [] # [PPO iteration, minimum sampled leg height in m]
-height_nominal = 0.20
-height_max_probability = 0.0 # probability of sampling height_range's upper endpoint
-height_rate = 0.30 # m/s
-height_acceleration = 0.0 # m/s²; zero uses the legacy rate-only command
-command_seconds = [2.0, 4.0]
-speed_maneuvers = false
-braking_maneuvers = false
-launch_maneuvers = false # repeated start, cruise and stop at a fixed leg height
-height_maneuvers = false # reserve flat-ground episodes for height changes at rest or at constant speed
-stationary_episode_fraction = 0.0 # fraction of flat-ground episodes with fixed height and zero motion commands
-launch_press_seconds = [] # optional total press durations, including the speed ramp
-launch_stop_seconds = [] # optional time held at zero command after the braking ramp
-speed_maneuver_weights = [] # random, straight, spin, slalom, optional corner brake, launch, and height changes
-command_speed_levels = [] # per-episode speed caps in m/s
-command_acceleration_levels = [] # per-episode acceleration caps in m/s²
-command_acceleration_weights = [] # optional weights for command_acceleration_levels
-cliff_approach_speed = 0.0 # optional training speed cap before a cliff landing
-terrain = "plane"
-terrain_traversal = false
-terrain_seed = 42
-cliff_drop_heights = [] # m; three forward-drop heights for scut_v1
-slope_degrees = [3.0, 6.0]
-roughness = 0.005 # m
-obstacle_height = [0.005, 0.010] # m
+enabled = false                   # 是否启用连续腿高任务
+leg_torque_limit = 12.0           # 单个主动腿关节的力矩上限，单位为牛·米
+height_range = [0.17, 0.20]       # 腿高指令范围，按髋关节到轮心的竖直距离计算，单位为米
+height_lowering_schedule = []     # 逐步降低腿高采样下限，每项为 [PPO 迭代轮数, 最低腿高（米）]
+height_nominal = 0.20             # 标称腿高，用于初始化和目标采样，单位为米
+height_max_probability = 0.0      # 直接抽到腿高上限的概率
+height_rate = 0.30                # 腿高指令的最大升降速度，单位为米/秒
+height_acceleration = 0.0         # 腿高指令的加速度上限，单位为米/秒²，填 0 时仅限制升降速度
+command_seconds = [2.0, 4.0]      # 常规指令重采样的时间间隔范围，单位为秒
+speed_maneuvers = false           # 是否按回合抽取一类速度训练动作
+braking_maneuvers = false         # 是否加入带速入弯后刹停的动作
+launch_maneuvers = false          # 是否加入固定腿高、反复起步和刹停的动作
+height_maneuvers = false          # 是否加入静止或匀速直行时改变腿高的动作
+stationary_episode_fraction = 0.0 # 平地回合中保持腿高且速度指令为零的比例
+launch_press_seconds = []         # 模拟按住前进或后退键的总时长档位，包含加速时间，单位为秒
+launch_stop_seconds = []          # 刹停后保持零速指令的时长档位，单位为秒
+# 权重顺序为随机指令、直线启停或换向、原地旋转、蛇形、弯中刹车、反复起停、升降。
+# 后三项只填已启用的动作，留空时使用内置采样方式。
+speed_maneuver_weights = []
+command_speed_levels = []         # 每个回合抽取的纵向速度上限档位，单位为米/秒
+command_acceleration_levels = []  # 每个回合抽取的纵向加减速度上限档位，单位为米/秒²
+command_acceleration_weights = [] # 加减速度档位的抽样权重，留空时等概率抽取
+manual_forward_acceleration = 4.0 # 回放的纵向加减速度上限，单位为米/秒²
+cliff_approach_speed = 0.0        # 下台阶落地前的接近速度上限，单位为米/秒，填 0 时不启用
+terrain = "plane"                 # plane 为平地，mixed 为混合地形，scut_v1 为跑场，scut_ground 为贴地跑场
+terrain_traversal = false         # 是否在障碍地形上沿赛道持续行驶
+terrain_forward_limit = 0.0       # 非平地巡航指令的速度上限，单位为米/秒，填 0 时不额外限制
+scut_ground_scale = 1.0           # scut_ground 地形的垂直缩放比例，坡度和障碍高度一同缩放
+scut_ground_bars_fraction = 0.10  # scut_ground 中交叉凸条的回合占比，平地仍占 40%
+scut_ground_bars_reverse_probability = 0.50 # scut_ground 凸条回合中倒车通过的概率
+terrain_seed = 42                 # 地形生成的随机种子
+cliff_drop_heights = []           # 华南虎赛道上三档向前落差的高度，单位为米
+slope_degrees = [3.0, 6.0]        # 混合地形的坡度范围，单位为度
+roughness = 0.005                 # 粗糙地形的随机起伏幅度，单位为米
+obstacle_height = [0.005, 0.010]  # 凸条和小台阶的高度范围，单位为米
 
+# PPO 每轮的采样和保存设置。
 [ppo]
-num_steps_per_env = 24
-save_interval = 500
+num_steps_per_env = 24 # 每轮更新前，每个环境采集的仿真步数
+save_interval = 500    # 每隔多少轮保存一次模型检查点
 
 [ppo.policy]
-actor_hidden_dims = [256, 128, 64]
-critic_hidden_dims = [256, 128, 64]
-activation = "elu"
-init_noise_std = 1.0
+actor_hidden_dims = [256, 128, 64]  # 动作网络各隐藏层的神经元数量
+critic_hidden_dims = [256, 128, 64] # 价值网络各隐藏层的神经元数量
+activation = "elu"                  # 隐藏层使用的激活函数
+init_noise_std = 1.0                # 策略初始动作探索噪声的标准差
 
 [ppo.algorithm]
-value_loss_coef = 2.0
-use_clipped_value_loss = true
-clip_param = 0.2
-entropy_coef = 0.005
-num_learning_epochs = 5
-num_mini_batches = 4
-learning_rate = 0.0001
-schedule = "adaptive"
-gamma = 0.99
-lam = 0.95
-desired_kl = 0.01
-max_grad_norm = 1.0
+value_loss_coef = 2.0         # 价值预测误差在总损失中的权重
+use_clipped_value_loss = true # 是否在计算价值损失时裁剪价值预测的变化
+clip_param = 0.2              # PPO 裁剪幅度，用于抑制单次更新过大
+entropy_coef = 0.005          # 探索奖励权重，越大越鼓励尝试不同动作
+num_learning_epochs = 5       # 每批采样数据重复训练的遍数
+num_mini_batches = 4          # 每遍训练把采样数据分成几小批
+learning_rate = 0.0001        # 初始学习率
+schedule = "adaptive"         # 学习率调节方式，adaptive 表示按策略变化大小自动调节
+gamma = 0.99                  # 未来奖励的折扣系数，越接近 1 越看重长期奖励
+lam = 0.95                    # 优势估计的平滑系数，越大越多结合后续步的奖励
+desired_kl = 0.01             # 新旧策略差异的目标值，用 KL 散度衡量，供学习率自动调节使用
+max_grad_norm = 1.0           # 梯度范数上限，用于抑制过大的参数更新

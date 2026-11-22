@@ -17,7 +17,7 @@ import torch
 
 from configs.experiment import (MAX_FORWARD_SPEED, SNAPSHOT_NAME, TRAINING_DIR, load_config, load_snapshot,
                                 runner_config, save_run_config)
-from envs.terrain import SCUT_V1_SURFACES, SURFACES
+from envs.terrain import SCUT_V1_SURFACES, TERRAIN_LANES
 from robots.scut import WheelbipeFlatEnv
 from robots.wheel_leg import WheelLegFlatEnv
 from robots.wheel_leg_locomotion import WheelLegLocomotionEnv
@@ -216,7 +216,10 @@ def demo(env, options, ppo, live_view=None):
     if locomotion:
         default_height = env.drop_approach_height if env.forward_drop and options.surface == "cliff" else env.height_nominal
         height_sequence = options.height_sequence or [options.height or default_height]
-        env.begin_demo(height_sequence[0], options.surface or "flat", reverse=options.speed < 0.0)
+        env.begin_demo(height_sequence[0], options.surface or "flat", reverse=options.speed < 0.0,
+                       variant=(options.terrain_variant or 1) - 1)
+        if env.lanes is not None:
+            print(f"Terrain: {env.terrain_description()}", flush=True)
         height_request = height_sequence[0]
     else:
         env.reset()
@@ -347,6 +350,7 @@ def main():
     heights.add_argument("--height-sequence", type=float, nargs="+", help="Successive demo leg-height targets in meters")
     parser.add_argument("--height-hold", type=float, default=2.0, help="Seconds between demo height targets")
     parser.add_argument("--surface", choices=SCUT_V1_SURFACES, help="Spawn on this lane when replaying a terrain policy")
+    parser.add_argument("--terrain-variant", type=int, help="Select a 1-based lane difficulty when replaying")
     parser.add_argument("--terrain-seed", type=int, help="Override the mixed-terrain layout seed")
     parser.add_argument("--forward-limit", type=float, help="Override the training speed range with this symmetric limit")
     parser.add_argument("--viewer", action="store_true", help="Show the live Genesis scene in demo mode")
@@ -368,7 +372,7 @@ def main():
     if args.mode != "train" and (args.resume or args.init_checkpoint or args.forward_limit is not None):
         parser.error("--resume, --init-checkpoint and --forward-limit require train mode")
     if args.mode == "train" and (args.viewer or args.video or args.checkpoint or args.height is not None or body_heights
-                                 or args.height_sequence or args.surface or args.yaw):
+                                 or args.height_sequence or args.surface or args.terrain_variant is not None or args.yaw):
         parser.error("Viewer, recording, checkpoint and manual geometry/command options require demo mode")
     if args.keyboard and (args.mode != "demo" or args.checkpoint is None):
         parser.error("--keyboard requires demo mode and --checkpoint")
@@ -437,12 +441,17 @@ def main():
             parser.error(f"Height demo requires a locomotion checkpoint and targets in [{low:g}, {high:g}] m")
     if body_heights and (not locomotion["enabled"] or any(not isfinite(height) for height in body_heights)):
         parser.error("Body heights require a locomotion checkpoint and finite targets")
+    lane_class = TERRAIN_LANES.get(locomotion["terrain"])
     if args.surface:
-        surfaces = SCUT_V1_SURFACES if locomotion["terrain"] == "scut_v1" else SURFACES
-        if not locomotion["enabled"] or locomotion["terrain"] == "plane" or args.surface not in surfaces:
+        if not locomotion["enabled"] or lane_class is None or args.surface not in lane_class.surfaces:
             parser.error("--surface must name a lane in the selected locomotion terrain")
         if args.surface == "cliff" and locomotion["cliff_drop_heights"] and args.speed < 0 and not args.keyboard:
             parser.error("The cliff drop requires a positive forward speed")
+    if args.terrain_variant is not None:
+        if not args.surface:
+            parser.error("--terrain-variant requires --surface")
+        if not 1 <= args.terrain_variant <= lane_class.variants:
+            parser.error(f"--terrain-variant must be in [1, {lane_class.variants}]")
     if args.terrain_seed is not None:
         if not locomotion["enabled"] or locomotion["terrain"] == "plane" or args.terrain_seed < 0:
             parser.error("--terrain-seed requires a terrain configuration and a nonnegative seed")

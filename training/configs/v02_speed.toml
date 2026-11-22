@@ -21,9 +21,23 @@ command_speed_levels = [0.8, 1.2, 1.6]
 command_acceleration_levels = [1.0, 2.0, 4.0]
 command_acceleration_weights = [0.35, 0.45, 0.20]
 
-# Override SCUT V14 Rough-v1 reward settings here. See task.scut_rough_reward in flat.toml for all defaults.
-# [task.scut_rough_reward.tracking]
-# pitch_penalty_weight = 2.0
+# Tighten attitude tracking and keep a speed-error signal when the chassis is far below the reference.
+[task.scut_rough_reward.tracking]
+forward_reward_weight = 2.35
+forward_error_clip = 1.60
+forward_error_scale = 0.50
+pitch_penalty_weight = 2.60
+pitch_width = 0.016
+roll_penalty_weight = 3.00
+roll_width = 0.008
+
+[task.scut_rough_reward.regularization]
+body_angular_velocity_weight = 0.20
+
+[task.scut_rough_reward.braking]
+enabled = true
+recovery_seconds = 0.90
+recovery_speed_weight = 0.65
 
 [ppo]
 save_interval = 50

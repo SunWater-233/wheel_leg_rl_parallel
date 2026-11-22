@@ -6,7 +6,7 @@ from genesis.utils.geom import inv_transform_by_quat
 from tensordict import TensorDict
 
 from configs.experiment import MAX_FORWARD_ACCELERATION, MAX_FORWARD_SPEED, YAW_REFERENCE
-from envs.terrain import ScutV1Lanes, TerrainLanes
+from envs.terrain import TERRAIN_LANES, ScutGroundLanes, ScutV1Lanes
 from robots.domain_randomization import randomize_dynamics
 from robots.scut_rough_reward import ScutRoughReward
 from robots.wheel_leg import HOME_JOINTS, WheelLegFlatEnv
@@ -34,8 +34,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         if settings["terrain"] == "plane":
             super()._add_ground(material, viewer)
             return
-        lanes = ScutV1Lanes if settings["terrain"] == "scut_v1" else TerrainLanes
-        self.lanes = lanes(settings)
+        self.lanes = TERRAIN_LANES[settings["terrain"]](settings)
         surface = self.lanes.visual_surface() if viewer else None
         self.ground = self.scene.add_entity(self.lanes.morph(viewer), material=material, surface=surface)
         self.terrain_contacts.append(self.ground)
@@ -82,6 +81,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.command_lower, self.command_upper = self.commands.new_tensor(ranges).T
         self.motion_step = self.commands.new_tensor((self.forward_acceleration, self.yaw_acceleration))
         self.motion_step = self.motion_step.expand(self.num_envs, -1).clone() * self.control_dt
+        self.manual_forward_acceleration = settings["manual_forward_acceleration"]
         self.speed_levels = self.commands.new_tensor(settings["command_speed_levels"])
         self.acceleration_levels = self.commands.new_tensor(settings["command_acceleration_levels"])
         self.acceleration_weights = self.commands.new_tensor(settings["command_acceleration_weights"])
@@ -133,6 +133,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.terrain_selection = torch.zeros((2, self.num_envs), dtype=self.episode_length_buf.dtype, device=self.device)
         self.surface, self.terrain_variant = self.terrain_selection.unbind()
         self.terrain_traversal = settings["terrain_traversal"]
+        self.terrain_forward_limit = settings["terrain_forward_limit"]
         if self.terrain_traversal:
             self.traversal_reverse = torch.zeros_like(self.surface, dtype=torch.bool)
             self.traversal_distance = torch.zeros_like(self.command_time)
@@ -150,6 +151,8 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             self.lane_spawn_x = self.commands.new_tensor(self.lanes.spawn_x)
             self.lane_spawn_z = self.commands.new_tensor(self.lanes.spawn_z)
             self.spawn_x = torch.zeros_like(self.spawn_y)
+            self.reverse_probabilities = (self.commands.new_tensor(self.lanes.reverse_probabilities)
+                                          if isinstance(self.lanes, ScutGroundLanes) else None)
         if self.forward_drop:
             self.cliff_surface = self.lanes.surfaces.index("cliff")
             self.deck_height = torch.zeros_like(self.command_time)
@@ -219,6 +222,8 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             if self.speed_levels.numel():
                 terrain_cap = torch.minimum(forward_cap, self.terrain_speed_limit[surface])
                 limit = limit.clamp(-terrain_cap, terrain_cap)
+            if self.terrain_forward_limit:
+                limit = limit.clamp(-self.terrain_forward_limit, self.terrain_forward_limit)
             cruise = limit * (0.65 + 0.35 * sample[:, 0])
             if self.cliff_approach_speed:
                 airborne = cliff & (~self.drop_touched[ids] | (self.landing_elapsed[ids] < self.landing_seconds))
@@ -350,8 +355,12 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             qpos[:, self.base_xy[0]] = 0.0
             qpos[:, self.base_xy[1]] = self.spawn_y[ids] + jitter
             if scut_course:
-                reverse = (torch.rand(ids.numel(), device=self.device) < 0.5 if self.auto_commands else
-                           torch.full((ids.numel(),), self.demo_reverse, device=self.device, dtype=torch.bool))
+                if self.auto_commands:
+                    reverse_probability = (0.5 if self.reverse_probabilities is None else
+                                           self.reverse_probabilities[self.surface[ids]])
+                    reverse = torch.rand(ids.numel(), device=self.device) < reverse_probability
+                else:
+                    reverse = torch.full((ids.numel(),), self.demo_reverse, device=self.device, dtype=torch.bool)
                 self.traversal_reverse[ids] = reverse
                 ground_height = self.lane_spawn_z[lane]
                 positive_x = reverse
@@ -395,15 +404,14 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         if self.speed_levels.numel() and self.auto_commands:
             levels = torch.randint(self.speed_levels.numel(), (ids.numel(),), device=self.device)
             self.episode_speed_limit[ids] = self.speed_levels[levels]
-        if self.acceleration_levels.numel():
-            forward_accel = self.forward_acceleration
-            if self.auto_commands:
-                if self.acceleration_weights.numel():
-                    levels = torch.multinomial(self.acceleration_weights, ids.numel(), replacement=True)
-                else:
-                    levels = torch.randint(self.acceleration_levels.numel(), (ids.numel(),), device=self.device)
-                forward_accel = self.acceleration_levels[levels]
-            self.motion_step[ids, 0] = forward_accel * self.control_dt
+        if not self.auto_commands:
+            self.motion_step[ids, 0] = self.manual_forward_acceleration * self.control_dt
+        elif self.acceleration_levels.numel():
+            if self.acceleration_weights.numel():
+                levels = torch.multinomial(self.acceleration_weights, ids.numel(), replacement=True)
+            else:
+                levels = torch.randint(self.acceleration_levels.numel(), (ids.numel(),), device=self.device)
+            self.motion_step[ids, 0] = self.acceleration_levels[levels] * self.control_dt
         if self.auto_commands:
             if self.stationary_episode_fraction:
                 stationary = torch.rand(ids.numel(), device=self.device) < self.stationary_episode_fraction
@@ -425,12 +433,12 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             self._sample_motion_goals(ids)
             self._sample_height_goals(ids)
 
-    def begin_demo(self, height, surface, reverse=False):
+    def begin_demo(self, height, surface, reverse=False, variant=0):
         self.auto_commands = False
         self.demo_initial_height = height
         self.demo_surface = self.lanes.surfaces.index(surface) if self.lanes is not None else None
         self.demo_reverse = reverse
-        self.demo_variant = 0
+        self.demo_variant = variant
         self.reset()
 
     def set_commands(self, forward, yaw, height):
@@ -554,7 +562,10 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                 torch.maximum(self.traversal_distance, x.abs(), out=self.traversal_distance)
             surface_z = self.ground_height_at(pos)
             clearance = height - surface_z.nan_to_num()
-            out_of_bounds = ((pos[:, 0].abs() >= self.lanes.travel_limit)
+            travel_limit = self.lanes.travel_limit
+            if isinstance(self.lanes, ScutGroundLanes):
+                travel_limit = torch.where(self.surface == 0, self.lanes.flat_travel_limit, travel_limit)
+            out_of_bounds = ((pos[:, 0].abs() >= travel_limit)
                              | ((pos[:, 1] - self.spawn_y).abs() >= self.lanes.lateral_limit)
                              | ~torch.isfinite(surface_z))
 

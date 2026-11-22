@@ -8,6 +8,7 @@ SURFACES = ("flat", "slope", "rough", "bars", "stairs")
 SURFACE_WEIGHTS = (0.40, 0.25, 0.20, 0.075, 0.075)
 SCUT_V1_SURFACES = SURFACES + ("inv_slope", "inv_stairs_low", "inv_stairs_high",
                                "stairs_slow", "stairs_fast", "cliff")
+SCUT_GROUND_SURFACES = SURFACES + ("inv_slope", "inv_stairs_low", "inv_stairs_high")
 SURFACE_STYLES = {
     "flat": ("平地", (116, 141, 160)),
     "slope": ("坡道", (112, 157, 123)),
@@ -121,7 +122,8 @@ class ScutV1Lanes(TerrainLanes):
 
     def __init__(self, settings):
         rng = np.random.default_rng(settings["terrain_seed"])
-        x = np.arange(-50, 51) * self.spacing
+        half_cells = round(self.half_length / self.spacing)
+        x = np.arange(-half_cells, half_cells + 1) * self.spacing
         y = np.arange(-45, 45) * self.spacing
         width = len(y)
         radius = np.maximum(np.abs(x)[:, None], np.abs(y)[None, :])
@@ -192,3 +194,39 @@ class ScutV1Lanes(TerrainLanes):
             depth = np.clip(2.5 - radius, 0.0, 1.0)
             return (offset - riser * np.floor(depth / 0.10 + 1e-8)) * (radius <= 2.5)
         return np.zeros_like(radius)
+
+
+class ScutGroundLanes(ScutV1Lanes):
+    """Grounded SCUT terrain with an extended straight for flat starts and stops."""
+
+    surfaces = SCUT_GROUND_SURFACES
+    surface_weights = (0.40, 0.10, 0.12, 0.10, 0.08, 0.08, 0.06, 0.06)
+    half_length = 12.0
+    flat_travel_limit = 11.8
+
+    def __init__(self, settings):
+        self.scale = settings["scut_ground_scale"]
+        bars = self.surfaces.index("bars")
+        fraction = settings["scut_ground_bars_fraction"]
+        self.reverse_probabilities = tuple(
+            settings["scut_ground_bars_reverse_probability"] if index == bars else 0.5
+            for index in range(len(self.surfaces))
+        )
+        if fraction != self.surface_weights[bars]:
+            obstacle_fraction = 1.0 - self.surface_weights[0]
+            other_scale = (obstacle_fraction - fraction) / (obstacle_fraction - self.surface_weights[bars])
+            self.surface_weights = (self.surface_weights[0], *(
+                fraction if index == bars else weight * other_scale
+                for index, weight in enumerate(self.surface_weights[1:], start=1)
+            ))
+        super().__init__(settings)
+
+    def _tile(self, surface, difficulty, x, y, radius, rng):
+        profile = super()._tile(surface, difficulty, x, y, radius, rng)
+        if surface == "rough":
+            # The reference rough tile has one amplitude; expose three levels for validation.
+            profile *= 0.60 + 0.40 * difficulty
+        return profile * self.scale
+
+
+TERRAIN_LANES = {"mixed": TerrainLanes, "scut_v1": ScutV1Lanes, "scut_ground": ScutGroundLanes}

@@ -1,0 +1,203 @@
+"""Load experiment settings and record each training run."""
+
+from copy import deepcopy
+from hashlib import sha256
+import json
+from math import isfinite
+from pathlib import Path
+import tomllib
+
+
+TRAINING_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = Path(__file__).with_name("flat.toml")
+SNAPSHOT_NAME = "run_config.json"
+MAX_FORWARD_SPEED = 2.5
+YAW_REFERENCE = 11.0
+HEIGHT_LIMITS = (0.17, 0.33)
+MAX_HEIGHT_RATE = 1.2
+MAX_FORWARD_ACCELERATION = 4.0
+
+
+def _apply_overrides(settings, overrides, section=""):
+    if not isinstance(overrides, dict):
+        raise ValueError(f"Expected a table for {section or 'the experiment configuration'}")
+    for key, value in overrides.items():
+        name = f"{section}.{key}" if section else key
+        if key not in settings:
+            raise ValueError(f"Unknown setting: {name}")
+        default = settings[key]
+        if isinstance(default, dict):
+            _apply_overrides(default, value, name)
+        elif type(value) is type(default) or (type(default) is float and type(value) is int):
+            settings[key] = value
+        else:
+            raise ValueError(f"Invalid value for {name}: {value!r}")
+
+
+def _validate_range(settings, name):
+    limits = settings[name]
+    if (len(limits) != 2 or any(type(v) not in (int, float) or not isfinite(v) for v in limits)
+            or limits[0] > limits[1]):
+        raise ValueError(f"{name} must contain two finite limits in ascending order")
+    return limits
+
+
+def _validate_settings(settings):
+    task = settings["task"]
+    if not isfinite(task["episode_seconds"]) or task["episode_seconds"] <= 0:
+        raise ValueError("task.episode_seconds must be finite and positive")
+    if not isfinite(task["friction"]) or task["friction"] < 0:
+        raise ValueError("task.friction must be finite and nonnegative")
+    for name in ("forward_command", "yaw_command"):
+        _validate_range(task, name)
+    for name, weight in task["reward"].items():
+        if not isfinite(weight) or weight < 0:
+            raise ValueError(f"task.reward.{name} must be finite and nonnegative")
+    for name, std in task["observation_noise"].items():
+        if not isfinite(std) or std < 0:
+            raise ValueError(f"task.observation_noise.{name} must be finite and nonnegative")
+
+    locomotion = task["locomotion"]
+    leg_torque_limit = locomotion["leg_torque_limit"]
+    if not isfinite(leg_torque_limit) or leg_torque_limit <= 0:
+        raise ValueError("task.locomotion.leg_torque_limit must be finite and positive")
+    for name in ("height_range", "command_seconds", "slope_degrees", "obstacle_height"):
+        _validate_range(locomotion, name)
+    low, high = locomotion["height_range"]
+    if not HEIGHT_LIMITS[0] <= low <= locomotion["height_nominal"] <= high <= HEIGHT_LIMITS[1]:
+        raise ValueError("height_range and height_nominal must fit the 0.17–0.33 m chassis range")
+    if not 0 <= locomotion["height_max_probability"] < 0.40:
+        raise ValueError("height_max_probability must be in [0, 0.40) to leave room for continuous sampling")
+    if not 0 < locomotion["height_rate"] <= MAX_HEIGHT_RATE or locomotion["command_seconds"][0] <= 0:
+        raise ValueError("Use a positive command period and a height_rate within 0–1.2 m/s")
+    if locomotion["braking_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
+        raise ValueError("braking_maneuvers requires enabled locomotion and speed_maneuvers")
+    for name, maximum in (("command_speed_levels", MAX_FORWARD_SPEED),
+                          ("command_acceleration_levels", MAX_FORWARD_ACCELERATION)):
+        if any(type(value) not in (int, float) or not 0 < value <= maximum for value in locomotion[name]):
+            raise ValueError(f"{name} must contain positive levels up to {maximum:g}")
+    if locomotion["terrain"] not in ("plane", "mixed", "scut_v1"):
+        raise ValueError("terrain must be plane, mixed or scut_v1")
+    has_terrain = locomotion["terrain"] != "plane"
+    if locomotion["terrain_traversal"] and not (locomotion["enabled"] and has_terrain):
+        raise ValueError("terrain_traversal requires enabled terrain locomotion")
+    if locomotion["terrain"] == "scut_v1" and not locomotion["terrain_traversal"]:
+        raise ValueError("scut_v1 requires terrain_traversal")
+    drops = locomotion["cliff_drop_heights"]
+    if drops and (locomotion["terrain"] != "scut_v1" or len(drops) != 3
+                  or any(type(drop) not in (int, float) or not 0.04 <= drop <= 0.40 for drop in drops)
+                  or not drops[0] < drops[1] < drops[2]
+                  or locomotion["height_range"][1] < 0.23):
+        raise ValueError("cliff_drop_heights requires scut_v1, three increasing drops in [0.04, 0.40] m, and at least 0.23 m leg height")
+    approach_speed = locomotion["cliff_approach_speed"]
+    if not 0 <= approach_speed <= MAX_FORWARD_SPEED or (approach_speed and not drops):
+        raise ValueError("cliff_approach_speed requires forward drops and a speed within the chassis range")
+    if (not 0 <= locomotion["slope_degrees"][0] <= locomotion["slope_degrees"][1] <= 15
+            or not 0 <= locomotion["roughness"] <= 0.03
+            or not 0 < locomotion["obstacle_height"][0] <= locomotion["obstacle_height"][1] <= 0.04
+            or locomotion["terrain_seed"] < 0):
+        raise ValueError("Invalid conventional terrain dimensions or seed")
+    if locomotion["enabled"]:
+        for name, limit in (("forward_command", MAX_FORWARD_SPEED), ("yaw_command", YAW_REFERENCE)):
+            low, high = task[name]
+            if not -limit <= low <= 0 <= high <= limit:
+                raise ValueError(f"{name} must include zero and fit ±{limit:g}")
+
+    randomization = task["domain_randomization"]
+    if randomization["enabled"]:
+        if not locomotion["enabled"] or not has_terrain or not 0.01 <= task["friction"] <= 5.0:
+            raise ValueError("Domain randomization requires terrain locomotion and friction in [0.01, 5.0]")
+        if not 0 <= randomization["nominal_probability"] <= 1:
+            raise ValueError("nominal_probability must be in [0, 1]")
+        friction = randomization["contact_friction"]
+        if not friction or any(type(mu) not in (int, float) or not 0.01 <= mu <= 5.0 for mu in friction):
+            raise ValueError("contact_friction must contain values in [0.01, 5.0]")
+        if _validate_range(randomization, "body_mass_scale")[0] <= 0:
+            raise ValueError("body_mass_scale must be positive")
+        offsets = randomization["load_offsets"]
+        if not offsets or any(not isinstance(offset, list) or len(offset) != 3 or
+                              any(type(v) not in (int, float) or not isfinite(v) for v in offset)
+                              for offset in offsets):
+            raise ValueError("load_offsets must contain finite XYZ positions")
+        for group in ("hips", "passive", "springs", "wheels"):
+            for key in ("frictionloss_delta", "damping_delta"):
+                _validate_range(randomization[group], key)
+
+    ppo = settings["ppo"]
+    for name in ("num_steps_per_env", "save_interval"):
+        if ppo[name] <= 0:
+            raise ValueError(f"ppo.{name} must be positive")
+    for name in ("num_learning_epochs", "num_mini_batches"):
+        if ppo["algorithm"][name] <= 0:
+            raise ValueError(f"ppo.algorithm.{name} must be positive")
+    for name in ("actor_hidden_dims", "critic_hidden_dims"):
+        dims = ppo["policy"][name]
+        if not dims or any(type(dim) is not int or dim <= 0 for dim in dims):
+            raise ValueError(f"ppo.policy.{name} must contain positive integers")
+
+
+def _merge_config(overrides):
+    with DEFAULT_CONFIG.open("rb") as file:
+        settings = tomllib.load(file)
+    if overrides is not None:
+        _apply_overrides(settings, overrides)
+    _validate_settings(settings)
+    return settings
+
+
+def load_snapshot(path):
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(snapshot, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    run = snapshot.pop("run", {})
+    return _merge_config(snapshot), run
+
+
+def load_config(path=None):
+    if path is None:
+        return _merge_config(None)
+    if path.suffix.lower() == ".json":
+        return load_snapshot(path)[0]
+    with path.open("rb") as file:
+        return _merge_config(tomllib.load(file))
+
+
+def runner_config(ppo):
+    # RSL-RL removes class names and alters the configuration it receives.
+    config = deepcopy(ppo)
+    config["obs_groups"] = {"policy": ["policy"], "critic": ["critic"]}
+    config["policy"]["class_name"] = "ActorCritic"
+    config["algorithm"]["class_name"] = "PPO"
+    return config
+
+
+def save_run_config(output, settings, args, robot_class, num_envs):
+    model = args.model.resolve()
+    snapshot = {
+        **settings,
+        "run": {
+            "task": robot_class.task_name,
+            "robot": args.robot,
+            "robot_label": robot_class.label,
+            "model": model.relative_to(TRAINING_DIR).as_posix() if model.is_relative_to(TRAINING_DIR) else str(model),
+            "model_sha256": sha256(model.read_bytes()).hexdigest(),
+            "seed": args.seed,
+            "backend": args.backend,
+            "num_envs": num_envs,
+            "iterations": args.iterations,
+            "physics_dt": robot_class.physics_dt,
+            "decimation": robot_class.decimation,
+            "control_dt": robot_class.physics_dt * robot_class.decimation,
+            "init_at_random_ep_len": True,
+        },
+    }
+    if args.resume is not None:
+        snapshot["run"]["resume_checkpoint"] = str(args.resume.resolve())
+    if args.init_checkpoint is not None:
+        snapshot["run"]["init_checkpoint"] = str(args.init_checkpoint.resolve())
+    contents = json.dumps(snapshot, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    output.mkdir(parents=True, exist_ok=True)
+    if any(output.iterdir()):
+        raise FileExistsError(f"Output directory already contains files: {output}. Choose a new --output path.")
+    with (output / SNAPSHOT_NAME).open("x", encoding="utf-8") as file:
+        file.write(contents)

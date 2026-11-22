@@ -1,0 +1,24 @@
+# Python environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Training checkpoints, logs, and rendered videos
+/training/outputs/
+
+# SolidWorks export caches and local model backups
+/training/assets/**/.swdescribe-automation-output.json
+/training/assets/**/meshes/.raw/
+/training/assets/**/meshes/*.stl.stamp
+/training/assets/**/*.xml*.bak
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# vscode工作区
+*.code-workspace

@@ -1,0 +1,11 @@
+[task.reward]
+leg_alignment = 1.0
+
+[task.locomotion]
+enabled = true
+leg_torque_limit = 40.0
+height_range = [0.17, 0.33]
+height_max_probability = 0.10
+
+[ppo]
+save_interval = 100

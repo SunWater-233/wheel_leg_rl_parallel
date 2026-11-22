@@ -1,0 +1,97 @@
+[task]
+episode_seconds = 20.0
+friction = 0.8
+forward_command = [-0.5, 0.5] # m/s
+yaw_command = [-0.5, 0.5] # rad/s
+
+# Multipliers for the reward terms.
+[task.reward]
+speed = 1.0
+steady_speed = 0.0 # locomotion cost for sustained straight-line speed error
+yaw = 1.0
+upright = 1.0
+height = 1.0
+leg_alignment = 0.0 # locomotion cost for left/right fore-aft offset difference
+braking_pitch = 0.0 # locomotion cost for excessive pitch and pitch rate during braking
+settled_motion = 0.0 # body-rate and motor-target continuity cost under settled flat-ground commands
+wheel_support = 1.0
+vertical_velocity = 1.0
+angular_velocity = 1.0
+action_rate = 1.0
+fall = 1.0
+
+[task.domain_randomization]
+enabled = false
+nominal_probability = 0.25
+contact_friction = [0.50, 0.65, 0.80, 0.95]
+body_mass_scale = [0.95, 1.10]
+# Load positions in meters relative to the nominal base COM, in the base frame.
+load_offsets = [[-0.12, 0.0, 0.0], [0.05, -0.025, 0.10], [0.05, 0.025, 0.10]]
+
+# Bounds are additive. Revolute groups use N·m and N·m·s/rad, sliders use N and N·s/m.
+[task.domain_randomization.hips]
+frictionloss_delta = [0.0, 0.15]
+damping_delta = [0.0, 0.06]
+
+[task.domain_randomization.passive]
+frictionloss_delta = [0.0, 0.03]
+damping_delta = [-0.008, 0.008]
+
+[task.domain_randomization.springs]
+frictionloss_delta = [0.0, 1.20]
+damping_delta = [-1.0, 1.0]
+
+[task.domain_randomization.wheels]
+frictionloss_delta = [0.0, 0.05]
+damping_delta = [0.0, 0.02]
+
+[task.observation_noise]
+gyro = 0.0 # rad/s standard deviation for actor inputs
+gravity = 0.0 # standard deviation for components of the projected gravity vector
+joint_position = 0.0 # rad
+joint_velocity = 0.0 # rad/s, before observation scaling
+
+[task.locomotion]
+enabled = false
+leg_torque_limit = 12.0 # N·m per active leg joint
+height_range = [0.17, 0.20] # hip-to-wheel vertical projection, m
+height_nominal = 0.20
+height_max_probability = 0.0 # probability of sampling height_range's upper endpoint
+height_rate = 0.30 # m/s
+command_seconds = [2.0, 4.0]
+speed_maneuvers = false
+braking_maneuvers = false
+command_speed_levels = [] # per-episode speed caps in m/s
+command_acceleration_levels = [] # per-episode acceleration caps in m/s²
+cliff_approach_speed = 0.0 # optional training speed cap before a cliff landing
+terrain = "plane"
+terrain_traversal = false
+terrain_seed = 42
+cliff_drop_heights = [] # m; three forward-drop heights for scut_v1
+slope_degrees = [3.0, 6.0]
+roughness = 0.005 # m
+obstacle_height = [0.005, 0.010] # m
+
+[ppo]
+num_steps_per_env = 24
+save_interval = 500
+
+[ppo.policy]
+actor_hidden_dims = [256, 128, 64]
+critic_hidden_dims = [256, 128, 64]
+activation = "elu"
+init_noise_std = 1.0
+
+[ppo.algorithm]
+value_loss_coef = 2.0
+use_clipped_value_loss = true
+clip_param = 0.2
+entropy_coef = 0.005
+num_learning_epochs = 5
+num_mini_batches = 4
+learning_rate = 0.0001
+schedule = "adaptive"
+gamma = 0.99
+lam = 0.95
+desired_kl = 0.01
+max_grad_norm = 1.0

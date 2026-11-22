@@ -1,0 +1,20 @@
+[task]
+forward_command = [-1.0, 1.0]
+yaw_command = [-4.0, 4.0]
+
+[task.reward]
+speed = 1.30
+leg_alignment = 1.40
+braking_pitch = 1.20
+
+[task.locomotion]
+enabled = true
+leg_torque_limit = 40.0
+height_range = [0.17, 0.33]
+height_max_probability = 0.10
+height_rate = 0.50
+speed_maneuvers = true
+braking_maneuvers = true
+
+[ppo]
+save_interval = 50

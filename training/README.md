@@ -1,0 +1,190 @@
+# 自研轮腿 V0.2 · Genesis 训练
+
+默认加载自研模型的 [wheel_leg_ground.xml](assets/wheel_leg_xml_V0.2/wheel_leg_ground.xml)。共享的平地任务沿用华南理工 Wheelbipe 的观测、奖励、跌倒判定和超时重置逻辑。V0.2 按 CAD 原件导入质量、惯量、关节限位和 6 处闭链，每处闭链由一对 `connect` 约束实现。训练以 500 Hz 步进物理、50 Hz 更新控制。
+
+V0.2 的站立复位姿态让双轮轴位于重心下方。动作依次控制 `hip_L`、`hip_R`、`hipknee_L`、`hipknee_R` 的位置和 `wheel_L`、`wheel_R` 的转速，右侧镜像轴的符号由环境处理。膝关节由连杆驱动，气弹簧沿原模型轴施加 200 N，四个腿部驱动默认沿用原模型的 ±12 N·m 限幅。连续腿高任务可用 `task.locomotion.leg_torque_limit` 调整单关节限矩。轮端限矩 ±5 N·m、PD 参数和被动关节阻尼是仿真假设。
+
+批量仿真用按 CAD 拟合的轮胎和导轮圆柱，以及其余刚体的包围盒，平地场景关闭自碰撞。原始 CAD 文件供回放绘图。
+
+## 项目结构
+
+```text
+training/
+├── main.py              # train 和 demo 入口
+├── assets/              # 机器人 MJCF、CAD 网格和授权
+├── robots/              # 自研 V0.2 和 SCUT 模型的姿态、关节映射与驱动参数
+├── envs/flat.py         # 并行仿真、指令、观测、奖励、终止和重置
+├── configs/flat.toml    # 平地任务和 PPO 默认配置
+├── tools/               # 资产转换、回放渲染和训练画面
+└── outputs/             # 本地实验配置、TensorBoard 日志、权重与视频
+```
+
+## 运行 demo
+
+以下命令在 `wheel_leg_rl_parallel/training` 下运行。
+
+```powershell
+uv sync --locked
+uv run --locked main.py demo --num-envs 4 --seconds 5 --video outputs/wheel_leg_v02.mp4
+```
+
+默认用脚本控制器从静止切换到 0.35 m/s 前进命令。终端输出速度、位移、重置次数和双轮接地步数。视频用原始 CAD 网格绘制 Genesis 记录的第一台机器人状态。加 `--viewer` 可在 Genesis 实时查看碰撞几何。初次运行可能需要编译 GPU 内核。
+
+## V0.2 连续腿高训练
+
+以下命令在 `training` 下运行。新任务从空白权重起步，使用髋关节中心到轮轴中心的垂直投影作为腿高。动作以随目标腿高变化的闭链姿态为参考，回合内持续采样高度和速度目标。初始高度范围为 17–20 cm，常用目标为 17 cm 和 20 cm，采样也覆盖中间任意值。
+
+```powershell
+uv sync --locked
+uv run --locked main.py train --config configs/v02_low.toml --num-envs 128 --iterations 30 --output outputs/v02_low_check
+uv run --locked main.py train --config configs/v02_low.toml --num-envs 1024 --iterations 1000 --output outputs/v02_low --live-port 6007
+```
+
+回放检查 `17 → 20 → 18.5 → 17 cm`。也可以加上 `--yaw 0.25` 在转向时检查。原生 Genesis 键盘回放中，按住 `Z/X` 可连续抬高或降低目标。
+
+```powershell
+uv run --locked main.py demo --checkpoint outputs/v02_low/model_999.pt --num-envs 1 --speed 0.35 --height-sequence 0.17 0.20 0.185 0.17 --height-hold 2
+```
+
+TensorBoard 记录 `Episode/height_mae_cm`、`Episode/forward_mae_m_s`、`Episode/fall_rate` 和 `Episode/leg_saturation_rate`。确认低腿位站稳、启停及高度切换后，再逐步提高平地速度，每次从上一档通过验证的权重初始化。`--init-checkpoint` 加载相同观测结构的权重，并重新初始化优化器。老平地权重使用原来的回放入口。
+
+```powershell
+uv run --locked main.py train --config configs/v02_speed.toml --init-checkpoint outputs/v02_low/model_999.pt --forward-limit 1.0 --num-envs 1024 --iterations 600 --output outputs/v02_speed_1
+uv run --locked main.py train --config configs/v02_rough.toml --init-checkpoint outputs/v02_speed_1/model_599.pt --num-envs 1024 --iterations 1000 --output outputs/v02_rough --live-port 6007
+uv run --locked main.py demo --checkpoint outputs/v02_rough/model_999.pt --surface bars --terrain-seed 101 --num-envs 1 --seconds 10 --speed 0.35 --height-sequence 0.17 0.20 0.185 0.17
+```
+
+`v02_speed` 每回合从五种平地工况中等概率选一种。工况包括常规随机指令、直线反复加速和刹停并穿插直接反向、原地左右快转、以当前线速度档位的 65% 行进并交替左右转向，以及高速入弯后制动。入弯前安排 1.45–2.45 s 的直行保持，刹停后安排 0.75–1.20 s 的回稳时间。快速转向请求上限为 ±4 rad/s，腿高目标每 2–4 s 在 17–33 cm 内独立重采样。
+
+平地线速度档位为 1.0、1.5、2.0、2.5 m/s，每档通过制动、连续反向、转向和饱和率检查后再进入下一档。线加速度和偏航角加速度指令上限分别为 4 m/s² 和 24 rad/s²，轮速和底盘摩擦圆会进一步限制组合指令。TensorBoard 的 `Episode/yaw_mae_rad_s` 和 `Episode/forward_mae_m_s` 记录经过限幅的指令跟踪误差。`v02_speed` 的腿高变化率上限为 0.5 m/s，`v02_low` 和 `v02_rough` 默认 0.3 m/s。
+
+`task.reward.braking_pitch` 在速度请求减小或反向时抑制过大的俯仰与俯仰角速度，停车后短暂延续。系统同时检查原始速度请求和下发速度的减速斜率，避免摩擦圆限幅的波动单独触发惩罚。俯仰死区随线加速度参考由 6° 放宽至 12°，参考趋稳后收紧。`v02_speed` 提高了线速度跟踪和左右腿前后对齐的权重，腿部限矩为 ±40 N·m。TensorBoard 的 `Episode/pitch_abs_deg` 和 `Episode/pitch_peak_deg` 分别记录回合平均绝对俯仰与峰值，回放终端也显示俯仰。用现有权重开始此阶段时，指定新版配置并用 `--init-checkpoint` 初始化。
+
+地形采样包含 40% 平地、25% 上下坡、20% 随机起伏、15% 凸条和低阶梯。通过 `--surface flat|slope|rough|bars|stairs` 选择回放地形，用训练未见的 `--terrain-seed` 验证。正、负 `--speed` 分别检验同一条坡或阶梯的两个方向。按实际越过的障碍、跌倒和过障后速度恢复评估效果。高度范围可在 TOML 的 `task.locomotion.height_range` 内逐步扩大，允许的配置范围为 17–33 cm。程序会在启动时校验闭链姿态，扩展档位还需验证承重和力矩余量。
+
+### 从低腿高扩展到高腿高
+
+用低腿高权重或上一版高腿高权重初始化 17–33 cm 的平地训练。高腿高配置的四个腿部驱动仿真限矩均为 ±40 N·m，轮端限矩为 ±5 N·m。保留 ±0.5 m/s 线速度、±0.5 rad/s 偏航角速度和 0.30 m/s 的腿高参考变化上限。训练回合内继续切换高度。目标中 25% 为 17 cm，35% 为 20 cm，10% 为 33 cm，余下 30% 在整段高度连续采样。
+
+```powershell
+uv run --locked main.py train --config configs/v02_height_33.toml --init-checkpoint outputs/v02_low/model_999.pt --num-envs 1024 --iterations 600 --output outputs/v02_height_33_40nm
+uv run --locked main.py demo --checkpoint outputs/v02_height_33_40nm/model_599.pt --num-envs 1 --speed 0.35 --height-sequence 0.17 0.25 0.33 0.28 0.20 0.17 --height-hold 2
+```
+
+回放同时检查行进升降、低位回归、高位保持和力矩饱和。也可用 `--height-sequence 0.17 0.33 0.17` 单独检查跨全行程的高度切换。
+
+平地高腿高配置保留原有的横滚与俯仰奖励，并启用 `task.reward.leg_alignment`。左右轮轴各自相对同侧髋中心的前后投影差超过 2 cm 时开始扣分。TensorBoard 记录回合平均绝对横滚角、左右腿前后错位和腿高差，回放输出这三项的峰值。
+
+`v02_rough` 沿用 17–33 cm 腿高、±40 N·m 腿部限矩与制动姿态奖励，速度请求为 ±0.8 m/s。坡度为 3–6°，随机起伏高度在 ±6 mm 内，凸条和单级台阶高 6–12 mm。每个非平地回合随机选择一个行驶方向，并沿同方向持续采样 0.52–0.80 m/s 的纵向速度请求，让机器人驶离平坦起点并越过连续障碍。平地回合保留随机速度和转向指令。TensorBoard 的 `Episode/terrain_progress_m` 记录车体在赛道纵向走过的最大距离。
+
+## 旧平地 PPO 短训与回放
+
+```powershell
+uv run --locked main.py train --num-envs 256 --iterations 100 --output outputs/ppo_wheel_leg_v02_run1
+uv run --locked main.py demo --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --video outputs/ppo_v02_replay.mp4
+```
+
+旧平地 PPO 使用独立的策略和 critic 观测，奖励参考 `Flat-v0`，包含速度、姿态、高度跟踪和主驱动轮承重。Checkpoint 校验机器人型号和任务观测结构。
+
+## 从 checkpoint 继续训练
+
+```powershell
+uv run --locked main.py train --resume outputs/ppo_wheel_leg_v02_run1/model_99.pt --iterations 100 --live-port 6007 --live-fps 60
+```
+
+续训会恢复策略、critic 和优化器，使用 checkpoint 同目录的 `run_config.json` 还原任务、PPO 设置和启动参数。`--iterations` 指本次追加的轮数。上面的命令运行第 100 至 199 轮，生成 `model_199.pt`。仿真环境会重新初始化。续训的 checkpoint 和 TensorBoard 日志写入新的输出目录，TensorBoard 的迭代编号接续旧 checkpoint。旧 checkpoint 如果缺少配置快照，请用 `--robot`、`--num-envs` 和 `--config` 等参数指定原来的设置。
+
+## 实时训练监控
+
+在本机启动带监控的训练：
+
+```powershell
+uv run --locked main.py train --num-envs 64 --iterations 12 --live-port 6007
+```
+
+Genesis 自动打开，显示并行环境 0 的机器人和当前地形。跑道按地形分色，高差会加深台阶边缘。打开 [实时训练页](http://127.0.0.1:6007/) 查看同一台机器人的地形、速度、位移、腿长和姿态，目标值与当前值并列显示。目标位移由本回合的速度和转向指令逐步推算。关闭 Genesis 窗口后，训练和网页监控继续运行。`--live-fps` 可调整窗口刷新率，默认 60 FPS。
+
+本地和远程监控页都提供训练轮次、采样速度、平均回合奖励、平均回合长度和两类 PPO 损失。曲线每轮更新，保留最近 300 轮，悬停可查看该轮数值。
+
+通过 SSH 使用 Windows 训练机时，在本机终端转发端口：
+
+```powershell
+ssh -t -L 6007:127.0.0.1:6007 hjcComputer powershell.exe -NoLogo -NoProfile
+```
+
+在远端的 `training` 目录里运行：
+
+```powershell
+uv run --locked main.py train --num-envs 64 --iterations 12 --live-port 6007 --live-stream
+```
+
+然后在本机浏览器打开 [实时训练页](http://127.0.0.1:6007/)。检测到 SSH 会话时，训练会自动采用网页串流。`--live-stream` 也可用于计划任务等无桌面的启动方式。画面由 MuJoCo 根据训练状态离屏绘制，默认目标为 8 FPS。关闭页面后渲染会暂停。训练进程退出时页面服务随之关闭。
+
+## Genesis 窗口驾驶
+
+```powershell
+uv run --locked main.py demo --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --keyboard --speed 2.5
+```
+
+在 Genesis 窗口中按住 `W/S` 前进或后退，按住 `A/D` 左转或右转。松键、按 `Space` 或切出窗口时，对应的运动指令归零。关闭窗口即可退出。原生键盘模式的前后目标速度默认上限为 2.5 m/s。实际速度取决于 checkpoint 的跟踪能力。
+
+搭配 `--live-port 6007 --live-telemetry` 可以在网页上查看数据，键盘输入由 Genesis 窗口接收。训练采样带有 PPO 探索噪声，回放使用策略的确定性动作。
+
+## 网页键鼠控制
+
+用相同的 SSH 端口转发，在远端 `training` 目录加载训练好的权重：
+
+```powershell
+uv run --locked main.py demo --robot v0.2 --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --live-port 6007 --keyboard
+```
+
+打开 [机器人回放页](http://127.0.0.1:6007/)，点击机器人画面后操作。按住 `W/S` 前进或后退，按住 `A/D` 左转或右转，也可以按住页面上的方向按钮。松键释放对应方向，`Space` 将两个指令归零。浏览器失焦或控制连接断开时，运动指令会归零。拖动画面旋转视角，滚轮缩放，可以点击「复位视角」。训练监控页也可以调整视角。
+
+回放使用 checkpoint 的指令范围，`--speed` 给前后速度设置上限。连续腿高权重可配合 `--height` 或 `--height-sequence` 使用。键盘模式默认持续运行，按 `Ctrl+C` 结束，也可以用 `--seconds` 限定时间。
+
+网页回放的目标为 60 FPS，可用 `--live-fps` 调整。机器人画面标题旁显示渲染帧率。策略仍以 50 Hz 更新，画面在相邻状态之间插值，复位时直接切到新姿态。
+
+## 用 TensorBoard 查看完整曲线
+
+在本机另开一个终端，建立 6006 端口转发：
+
+```powershell
+ssh -t -L 6006:127.0.0.1:6006 hjcComputer powershell.exe -NoLogo -NoProfile
+```
+
+在远端 PowerShell 启动 TensorBoard：
+
+```powershell
+Set-Location 'D:\RL_Stuff\wheel_leg_rl_parallel\training'
+uv run --locked tensorboard --logdir outputs --host 127.0.0.1 --port 6006
+```
+
+在本机打开 [TensorBoard](http://127.0.0.1:6006/)，在 **Scalars** 中查看 `Train/mean_reward`、`Train/mean_episode_length` 和 `Loss/`。TensorBoard 可以读取已经结束的实验，也可以对比 `outputs` 内的多次训练。
+
+## 调参与实验记录
+
+用 `--config` 指定 TOML 覆盖项，未填写的项沿用 [configs/flat.toml](configs/flat.toml)。`task.reward` 中的值是各奖励项相对于默认公式的倍率。可以将以下内容保存为 `slow_flat.toml`，再运行 `uv run --locked main.py train --config slow_flat.toml`。
+
+```toml
+[task]
+forward_command = [-0.3, 0.3]
+
+[task.reward]
+action_rate = 1.5
+
+[ppo.algorithm]
+learning_rate = 0.00005
+```
+
+每次训练在输出目录中生成 `run_config.json`。其中包含合并后的任务与 PPO 配置，以及实际使用的机器人型号、MJCF 路径与哈希、种子、环境数、迭代数和仿真步长。省略 `--output` 时自动创建带时间戳的目录。手动指定时使用新目录或空目录，每次运行独立保存。
+
+回放时默认使用 checkpoint 同目录的 `run_config.json`，早期权重沿用默认配置。可用 `--config` 显式指定 TOML 或 JSON 快照。复跑某次训练时，用 `--config` 读取其快照，并按 `run` 字段填写机器人、模型、种子、环境数和迭代数等启动参数。回放 SCUT 或自定义 MJCF 时，带上对应的 `--robot` 或 `--model`。
+
+## 华南理工参考模型
+
+```powershell
+uv run --locked main.py demo --robot scut
+uv run --locked convert_wheelbipe.py
+```
+
+转换脚本默认读取同一工作区内 `Ref_Git/wheeled-legged_RL` 的原版 USD。`--usd` 可以指定其他路径下的同一资产，`--output` 可以指定输出位置。资产的授权见 [SCUTRobotLab-LICENSE.txt](assets/SCUTRobotLab-LICENSE.txt)。

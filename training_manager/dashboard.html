@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="manager-token" content="__SESSION_TOKEN__">
+  <title>轮腿训练台</title>
+  <style>
+    :root { color-scheme: light; --canvas:#f0f3f7; --paper:#fff; --ink:#18243a; --muted:#4e5d72;
+      --line:#d5dce7; --blue:#1847ae; --green:#176449; --red:#a23730; }
+    * { box-sizing:border-box; }
+    [hidden] { display:none!important; }
+    body { margin:0; background:var(--canvas); color:var(--ink); font:15px/1.55 "Inter","Microsoft YaHei UI",system-ui,sans-serif; }
+    button,input,select { font:inherit; }
+    button,a,input,select { outline-offset:3px; }
+    button { cursor:pointer; }
+    button:disabled { opacity:.6; cursor:wait; }
+    a { color:var(--blue); }
+    .top { background:var(--ink); color:white; border-bottom:4px solid #5d88f2; }
+    .top-inner { max-width:1390px; margin:auto; padding:23px clamp(16px,4vw,50px) 20px;
+      display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    h1,h2,p { margin:0; }
+    h1 { font-size:clamp(22px,4vw,29px); font-weight:710; letter-spacing:.025em; }
+    h2 { font-size:17px; font-weight:700; }
+    .mode { color:#d9e4fd; font-size:13px; }
+    main { max-width:1390px; margin:auto; padding:22px clamp(16px,4vw,50px) 40px; }
+    .machines { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; margin-bottom:20px; }
+    .machine { display:grid; gap:3px; background:#e5ebf4; border-left:3px solid #5d76a0; padding:12px 16px; min-width:0; }
+    .machine strong { font-size:14px; }
+    .machine span { color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
+    .machine[data-online="true"] { border-left-color:var(--green); }
+    .layout { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(320px,1fr); align-items:start; gap:16px; }
+    .stack { display:grid; min-width:0; gap:16px; }
+    .panel { min-width:0; background:var(--paper); border:1px solid var(--line); }
+    .heading { padding:13px 17px; border-bottom:1px solid var(--line); display:flex; align-items:center;
+      justify-content:space-between; gap:10px; background:#f8fafd; }
+    .caption { color:var(--muted); font-size:13px; }
+    .jobs { margin:0; padding:0; list-style:none; max-height:355px; overflow:auto; }
+    .jobs li + li { border-top:1px solid var(--line); }
+    .job { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:12px; width:100%;
+      padding:11px 16px; border:0; border-left:3px solid transparent; background:white; color:inherit; text-align:left; }
+    .job:hover { background:#f3f6fc; }
+    .job[aria-current="true"] { background:#eaf0ff; border-left-color:var(--blue); }
+    .job strong, .job small { display:block; overflow-wrap:anywhere; }
+    .job small { color:var(--muted); font-size:12px; }
+    .tag { padding:2px 7px; font-size:12px; background:#eaf0f9; color:#2c4c7d; white-space:nowrap; }
+    [data-status="completed"] { background:#e0f2e8; color:var(--green); }
+    [data-status="failed"],[data-status="disconnected"] { background:#f8e9e6; color:var(--red); }
+    .body { padding:15px 17px; }
+    .empty { color:var(--muted); padding:18px; }
+    .summary { overflow-wrap:anywhere; font-size:14px; }
+    .detail-grid { display:grid; gap:10px; }
+    .controls, .artifacts { display:flex; flex-wrap:wrap; gap:8px; }
+    .subtle,.primary { border:1px solid #a8b8d2; padding:5px 11px; background:white; color:var(--blue); }
+    .subtle:hover { background:#eaf0ff; }
+    .primary { padding:8px 14px; background:var(--blue); color:white; border-color:var(--blue); font-weight:670; }
+    .primary:hover { background:#123886; }
+    .artifacts a { font-size:13px; overflow-wrap:anywhere; }
+    pre { margin:0; max-height:340px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere;
+      background:#172238; color:#e1eafc; padding:12px; font:12px/1.55 "Cascadia Mono","Consolas",monospace; }
+    .diagnosis { background:#eef3fb; border-left:3px solid #5d76a0; padding:9px 11px; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .form { padding:15px 17px; display:grid; gap:12px; }
+    .form-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px 12px; }
+    label { display:grid; gap:3px; font-size:13px; color:#33445d; min-width:0; }
+    input,select { width:100%; min-width:0; background:white; color:var(--ink); border:1px solid #aebacc;
+      border-radius:3px; padding:6px 8px; }
+    input[type="checkbox"] { width:auto; justify-self:start; }
+    .wide { grid-column:1/-1; }
+    .check { display:flex; align-items:center; gap:7px; }
+    .form-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+    .error { color:var(--red); overflow-wrap:anywhere; font-size:13px; }
+    #notice:not(:empty) { padding:8px 0 14px; }
+    @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
+    @media (max-width:460px) { .machines { grid-template-columns:1fr; } .top-inner { align-items:flex-start; flex-direction:column; } }
+  </style>
+</head>
+<body>
+  <header class="top"><div class="top-inner"><h1>轮腿训练台</h1><span class="mode" id="mode">连接管理器</span></div></header>
+  <main>
+    <section class="machines" id="machines" aria-label="训练设备"></section>
+    <div class="error" id="notice" role="status"></div>
+    <div class="layout">
+      <div class="stack">
+        <section class="panel" aria-labelledby="queue-title">
+          <div class="heading"><h2 id="queue-title">任务队列</h2><span class="caption" id="queue-count"></span></div>
+          <ul class="jobs" id="jobs"></ul>
+        </section>
+        <section class="panel" aria-labelledby="detail-title">
+          <div class="heading"><h2 id="detail-title">任务详情</h2><span class="caption" id="detail-id"></span></div>
+          <div class="body detail-grid" id="detail"><p class="caption">选择任务后查看日志与模型。</p></div>
+        </section>
+      </div>
+      <section class="panel" aria-labelledby="new-title">
+        <div class="heading"><h2 id="new-title">新建任务</h2><button class="subtle" id="catalog-refresh" type="button">刷新模型</button></div>
+        <form class="form" id="job-form">
+          <div class="form-grid">
+            <label class="wide">任务名<input name="name" maxlength="100" placeholder="例如 1.0 m/s 平地训练"></label>
+            <label>任务类型<select name="mode"><option value="train">PPO 训练</option><option value="demo">策略回放</option></select></label>
+            <label>执行设备<select name="target"><option value="auto">自动选择</option><option value="local">本机</option><option value="remote">远程</option></select></label>
+            <label class="wide" id="config-field">训练配置<select name="config"><option value="">默认或从模型读取</option></select></label>
+            <label class="wide">初始模型或回放模型<select name="checkpoint"><option value="">不加载模型</option></select></label>
+            <label class="wide" data-train>加载方式<select name="checkpoint_mode"><option value="init">初始化权重</option><option value="resume">续训并恢复优化器</option></select></label>
+            <label>并行环境数<input name="envs" type="number" value="128" min="1" max="16384" placeholder="沿用原训练"></label>
+            <label>仿真后端<select name="backend"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>
+            <label data-train>训练轮数<input name="iterations" type="number" min="1" max="100000" value="30"></label>
+            <label>随机种子<input name="seed" type="number" min="0" max="4294967295" placeholder="默认或沿用原训练"></label>
+            <label class="wide" id="speed-limit" data-train>训练速度上限（m/s）<input name="forward_limit" type="number" step="any" min=".001" max="2.5" placeholder="沿用配置"></label>
+            <label data-demo hidden>回放秒数<input name="seconds" type="number" min=".02" max="120" step="any" placeholder="默认"></label>
+            <label data-demo hidden>目标速度（m/s）<input name="speed" type="number" min="-2.5" max="2.5" step="any" value=".35"></label>
+            <label data-demo hidden>目标偏航（rad/s）<input name="yaw" type="number" min="-10" max="10" step="any" value="0"></label>
+            <label data-demo hidden>地形<select name="surface"><option value="">沿用模型</option><option>flat</option><option>slope</option><option>rough</option><option>bars</option><option>stairs</option></select></label>
+            <label data-demo hidden>地形种子<input name="terrain_seed" type="number" min="0"></label>
+            <label class="wide" data-demo hidden>腿高序列（m）<input name="heights" placeholder="0.17 0.20 0.17"></label>
+            <label class="check wide" data-demo hidden><input name="video" type="checkbox">保存回放视频</label>
+            <label class="wide">等待前置任务<select name="after"><option value="">直接排队</option></select></label>
+          </div>
+          <div class="form-actions"><button class="primary" type="submit">提交任务</button><span id="form-status" role="status" class="caption"></span></div>
+        </form>
+      </section>
+    </div>
+  </main>
+  <script>
+    const token = document.querySelector('meta[name=manager-token]').content;
+    const ui = id => document.getElementById(id);
+    const form = ui('job-form');
+    const field = name => form.elements.namedItem(name);
+    const states = {queued:'等待', staging:'同步输入', starting:'启动中', running:'运行中', disconnected:'失联',
+      syncing:'同步产物', completed:'已完成', failed:'失败', cancelled:'已取消'};
+    const devices = {local:'主机', remote:'远程'};
+    let selected = '', queueHash = '', detailHash = '', loading = false;
+
+    function element(tag, value, className) {
+      const item = document.createElement(tag);
+      if (value !== undefined) item.textContent = value;
+      if (className) item.className = className;
+      return item;
+    }
+
+    async function api(path, payload) {
+      const options = payload === undefined ? {} : {
+        method:'POST', headers:{'Content-Type':'application/json','X-Manager-Token':token}, body:JSON.stringify(payload)
+      };
+      const response = await fetch(path, options);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '操作失败');
+      return data;
+    }
+
+    function options(select, entries) {
+      const value = select.value;
+      while (select.options.length > 1) select.remove(1);
+      entries.forEach(entry => select.add(new Option(entry.label, entry.value)));
+      if (entries.some(entry => entry.value === value)) select.value = value;
+    }
+
+    async function loadCatalog() {
+      const {configs, models} = await api('/api/catalog');
+      options(field('config'), configs.map(value => ({value, label:value.replace('configs/', '')})));
+      options(field('checkpoint'), models);
+    }
+
+    function renderQueue(jobs) {
+      const hash = JSON.stringify([selected, jobs.map(({id, status, node, spec}) => [id, status, node, spec.name])]);
+      if (hash === queueHash) return;
+      queueHash = hash;
+      const list = jobs.map(job => {
+        const row = element('li');
+        const button = element('button', undefined, 'job');
+        button.type = 'button';
+        button.setAttribute('aria-current', String(job.id === selected));
+        const identity = element('span');
+        const kind = job.spec.mode === 'train' ? 'PPO 训练' : '策略回放';
+        identity.append(element('strong', job.spec.name), element('small', [kind, devices[job.node],
+          new Date(job.created * 1000).toLocaleString('zh-CN', {hour12:false})].filter(Boolean).join('  /  ')));
+        const status = element('span', states[job.status], 'tag');
+        status.dataset.status = job.status;
+        button.append(identity, status);
+        button.onclick = () => {
+          selected = job.id;
+          renderQueue(jobs);
+          button.blur();
+          refresh();
+        };
+        row.append(button);
+        return row;
+      });
+      ui('jobs').replaceChildren(...(list.length ? list : [element('li','提交任务后，进度会显示在这里。','empty')]));
+      ui('queue-count').textContent = jobs.length ? jobs.length + ' 项' : '';
+      options(field('after'), jobs.filter(job => !['failed','cancelled'].includes(job.status))
+        .map(job => ({label:job.spec.name, value:job.id})));
+    }
+
+    function renderDetail(job) {
+      const hash = JSON.stringify(job);
+      if (hash === detailHash) return;
+      detailHash = hash;
+      ui('detail-id').textContent = job.id;
+      const first = element('div', [states[job.status], devices[job.node], job.message].filter(Boolean).join('  /  '), 'summary');
+      const config = element('p', [
+        job.spec.config, job.spec.envs && job.spec.envs + ' 环境', job.spec.mode === 'train' && job.spec.iterations + ' 轮',
+        '源码 ' + job.source.git.slice(0, 7) + ' / ' + job.source.sha256.slice(0, 8)
+      ].filter(Boolean).join('  ·  '), 'caption');
+      const buttons = element('div', undefined, 'controls');
+      const ready = ['completed','failed','cancelled'].includes(job.status);
+      const models = Object.keys(job.artifacts).some(name => name.endsWith('.pt'));
+      const actions = [];
+      if (job.status === 'queued') actions.push(['cancel','取消排队']);
+      if (ready) {
+        actions.push(['diagnose', job.diagnosing ? '排查中' : '排查任务']);
+        if (job.spec.mode === 'train') actions.push(['smoke','短训复查']);
+        if (models || job.spec.checkpoint) actions.push(['replay','提交回放']);
+        if (models) actions.push(['resume','从最新模型续训']);
+      }
+      actions.forEach(([action,label]) => {
+        const button = element('button', label, 'subtle');
+        button.disabled = action === 'diagnose' && job.diagnosing;
+        button.onclick = async () => {
+          button.disabled = true;
+          try {
+            const result = await api('/api/jobs/' + job.id + '/' + action, {});
+            if (result.id) selected = result.id;
+            await refresh();
+          } catch (error) {
+            ui('notice').textContent = error.message;
+            button.disabled = false;
+          }
+        };
+        buttons.append(button);
+      });
+      const files = element('div', undefined, 'artifacts');
+      Object.keys(job.artifacts).forEach(name => {
+        const link = element('a', name);
+        link.href = '/artifacts/' + job.id + '/' + encodeURIComponent(name);
+        files.append(link);
+      });
+      const detail = ui('detail');
+      const oldLog = detail.querySelector('pre');
+      const log = job.log ? element('pre', job.log) : element('p','等待训练日志。','caption');
+      if (job.log) { log.tabIndex = 0; log.setAttribute('aria-label', '训练日志'); }
+      const pinBottom = !oldLog || oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 35;
+      const oldTop = oldLog ? oldLog.scrollTop : 0;
+      detail.replaceChildren(first, config, buttons, files);
+      if (job.diagnosis) {
+        const report = job.diagnosis;
+        detail.append(element('p', [report.provider, report.finding, report.error, report.dispatch_error,
+          report.followup && '已派发短训 ' + report.followup].filter(Boolean).join('\n'), 'diagnosis'));
+      }
+      detail.append(log);
+      log.scrollTop = pinBottom ? log.scrollHeight : oldTop;
+    }
+
+    async function refresh() {
+      if (loading) return;
+      loading = true;
+      try {
+        const state = await api('/api/state');
+        const pair = Boolean(state.nodes.remote);
+        ui('mode').textContent = (pair ? '本机与远程' : '仅本机') + (state.ai ? '  /  AI 排查已启用' : '  /  规则排查');
+        field('target').options[2].disabled = !pair;
+        ui('machines').replaceChildren(...Object.entries(state.nodes).map(([name, node]) => {
+          const box = element('article', undefined, 'machine');
+          box.dataset.online = node.online;
+          const status = node.online ? (node.busy ? '训练中' : '可用') : '离线';
+          const gpu = (node.gpu || '').split(',').map(part => part.trim());
+          const label = gpu.length === 4 ? gpu[0] + '  /  显存 ' + gpu[1] + ' / ' + gpu[2] + ' MiB' : node.error || '';
+          box.append(element('strong', devices[name] + (node.host ? ' · ' + node.host : '') + '  /  ' + status),
+            element('span', label));
+          return box;
+        }));
+        ui('notice').textContent = state.error || '';
+        if (!selected && state.jobs.length) selected = state.jobs[0].id;
+        renderQueue(state.jobs);
+        if (selected) {
+          const id = selected;
+          const job = await api('/api/jobs/' + id);
+          if (id === selected) renderDetail(job);
+        }
+      } catch (error) {
+        ui('notice').textContent = error.message;
+      } finally {
+        loading = false;
+      }
+    }
+
+    function fields(reset) {
+      const demo = field('mode').value === 'demo';
+      const resume = !demo && field('checkpoint_mode').value === 'resume';
+      document.querySelectorAll('[data-demo]').forEach(item => { item.hidden = !demo; });
+      document.querySelectorAll('[data-train]').forEach(item => { item.hidden = demo; });
+      ui('config-field').hidden = resume;
+      ui('speed-limit').hidden = demo || resume;
+      if (reset) field('envs').value = demo ? '1' : resume ? '' : '128';
+      if (resume) { field('config').value = ''; field('forward_limit').value = ''; }
+    }
+    field('mode').onchange = () => fields(true);
+    field('checkpoint_mode').onchange = () => fields(true);
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const button = form.querySelector('button[type=submit]');
+      const payload = Object.fromEntries(new FormData(form));
+      payload.video = field('video').checked;
+      if (payload.mode === 'demo') payload.checkpoint_mode = 'replay';
+      button.disabled = true;
+      ui('form-status').textContent = '正在保存代码快照';
+      try {
+        const job = await api('/api/jobs', payload);
+        selected = job.id;
+        ui('form-status').textContent = '已提交';
+        await refresh();
+      } catch (error) {
+        ui('form-status').textContent = error.message;
+      } finally {
+        button.disabled = false;
+      }
+    };
+    ui('catalog-refresh').onclick = () => loadCatalog().catch(error => { ui('notice').textContent = error.message; });
+    fields(false);
+    loadCatalog().catch(error => { ui('notice').textContent = error.message; });
+    refresh();
+    setInterval(refresh, 4000);
+  </script>
+</body>
+</html>

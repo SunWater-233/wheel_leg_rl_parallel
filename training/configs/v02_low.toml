@@ -1,0 +1,5 @@
+[task.locomotion]
+enabled = true
+
+[ppo]
+save_interval = 100

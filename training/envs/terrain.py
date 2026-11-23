@@ -9,6 +9,8 @@ SURFACE_WEIGHTS = (0.40, 0.25, 0.20, 0.075, 0.075)
 SCUT_V1_SURFACES = SURFACES + ("inv_slope", "inv_stairs_low", "inv_stairs_high",
                                "stairs_slow", "stairs_fast", "cliff")
 SCUT_GROUND_SURFACES = SURFACES + ("inv_slope", "inv_stairs_low", "inv_stairs_high")
+SCUT_GROUND_COMPOUND_SURFACES = ("rough_slope", "staggered_bars")
+SCUT_GROUND_SINGLE_SIDE_SURFACES = ("single_side_bars_left", "single_side_bars_right")
 SURFACE_STYLES = {
     "flat": ("平地", (116, 141, 160)),
     "slope": ("坡道", (112, 157, 123)),
@@ -21,6 +23,10 @@ SURFACE_STYLES = {
     "stairs_slow": ("低速高台阶", (177, 132, 110)),
     "stairs_fast": ("高速高台阶", (169, 115, 117)),
     "cliff": ("断崖", (122, 144, 153)),
+    "rough_slope": ("粗糙坡道", (119, 149, 107)),
+    "staggered_bars": ("错位凸条", (185, 130, 90)),
+    "single_side_bars_left": ("单侧凸条（左轮先过）", (174, 116, 86)),
+    "single_side_bars_right": ("单侧凸条（右轮先过）", (177, 100, 83)),
 }
 
 
@@ -34,6 +40,10 @@ class TerrainLanes:
     variants = 2
     travel_limit = 4.6
     lateral_limit = 0.85
+
+    @classmethod
+    def surface_names(cls, settings):
+        return cls.surfaces
 
     def __init__(self, settings):
         rng = np.random.default_rng(settings["terrain_seed"])
@@ -204,24 +214,75 @@ class ScutGroundLanes(ScutV1Lanes):
     half_length = 12.0
     flat_travel_limit = 11.8
 
+    @classmethod
+    def surface_names(cls, settings):
+        surfaces = cls.surfaces
+        if settings["scut_ground_compound_fraction"]:
+            surfaces += SCUT_GROUND_COMPOUND_SURFACES
+        if settings["scut_ground_single_side_fraction"]:
+            surfaces += SCUT_GROUND_SINGLE_SIDE_SURFACES
+        return surfaces
+
     def __init__(self, settings):
         self.scale = settings["scut_ground_scale"]
+        self.surfaces = self.surface_names(settings)
         bars = self.surfaces.index("bars")
         fraction = settings["scut_ground_bars_fraction"]
+        compound_fraction = settings["scut_ground_compound_fraction"]
+        single_side_fraction = settings["scut_ground_single_side_fraction"]
         self.reverse_probabilities = tuple(
             settings["scut_ground_bars_reverse_probability"] if index == bars else 0.5
             for index in range(len(self.surfaces))
         )
-        if fraction != self.surface_weights[bars]:
+        variant_overrides = {
+            "bars": settings["scut_ground_bars_variant_weights"],
+            "rough_slope": settings["scut_ground_rough_slope_variant_weights"],
+        }
+        self.surface_variant_weights = None
+        if any(variant_overrides.values()):
+            self.surface_variant_weights = tuple(
+                variant_overrides.get(surface) or self.variant_weights for surface in self.surfaces
+            )
+        if compound_fraction or single_side_fraction or fraction != self.surface_weights[bars]:
             obstacle_fraction = 1.0 - self.surface_weights[0]
-            other_scale = (obstacle_fraction - fraction) / (obstacle_fraction - self.surface_weights[bars])
+            other_scale = ((obstacle_fraction - fraction - compound_fraction - single_side_fraction)
+                           / (obstacle_fraction - self.surface_weights[bars]))
             self.surface_weights = (self.surface_weights[0], *(
                 fraction if index == bars else weight * other_scale
                 for index, weight in enumerate(self.surface_weights[1:], start=1)
             ))
+            if compound_fraction:
+                count = len(SCUT_GROUND_COMPOUND_SURFACES)
+                self.surface_weights += (compound_fraction / count,) * count
+            if single_side_fraction:
+                count = len(SCUT_GROUND_SINGLE_SIDE_SURFACES)
+                self.surface_weights += (single_side_fraction / count,) * count
         super().__init__(settings)
 
     def _tile(self, surface, difficulty, x, y, radius, rng):
+        if surface == "rough_slope":
+            slope = super()._tile("slope", difficulty, x, y, radius, rng)
+            rough = super()._tile("rough", difficulty, x, y, radius, rng)
+            taper = np.clip((2.8 - radius) / 0.45, 0.0, 1.0)
+            return self.scale * (slope + (0.30 + 0.30 * difficulty) * rough * taper)
+        if surface == "staggered_bars":
+            centers = np.array((-2.25, -0.75, 0.75, 2.25)) + rng.uniform(-0.10, 0.10, 4)
+            offset = (0.12 + 0.13 * difficulty) * np.clip(y / 0.50, -1.0, 1.0)
+            # Alternate which wheel reaches each ridge first, with a continuous join across the lane.
+            centers = centers + offset[:, None] * np.array((1.0, -1.0, 1.0, -1.0))
+            distance = np.min(np.abs(x[:, None, None] - centers), axis=2)
+            ridge = np.clip((0.15 - distance) / 0.075, 0.0, 1.0)
+            taper = np.clip((3.5 - radius) / 0.25, 0.0, 1.0)
+            return self.scale * (0.020 + 0.020 * difficulty) * ridge * taper
+        if surface in SCUT_GROUND_SINGLE_SIDE_SURFACES:
+            first_side = 1.0 if surface == SCUT_GROUND_SINGLE_SIDE_SURFACES[0] else -1.0
+            centers = np.array((-2.35, -1.15, 0.0, 1.15, 2.35))
+            sides = first_side * np.array((1.0, -1.0, 1.0, -1.0, 1.0))
+            distance = np.abs(x[:, None] - centers)
+            ridges = np.clip((0.18 - distance) / 0.08, 0.0, 1.0)
+            lateral = np.clip((y[:, None] * sides - 0.02) / 0.09, 0.0, 1.0)
+            lateral *= np.clip((0.90 - np.abs(y[:, None])) / 0.18, 0.0, 1.0)
+            return self.scale * (0.01875 + 0.01875 * difficulty) * (ridges @ lateral.T)
         profile = super()._tile(surface, difficulty, x, y, radius, rng)
         if surface == "rough":
             # The reference rough tile has one amplitude; expose three levels for validation.

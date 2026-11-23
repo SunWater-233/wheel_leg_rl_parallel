@@ -205,7 +205,9 @@ class ScutRoughReward:
         forward, yaw = env.commands[:, :2].unbind(dim=1)
         stand = forward.abs() < tracking["forward_deadband"]
         forward_target = forward.masked_fill(stand, 0.0)
-        yaw_target = yaw.masked_fill(yaw.abs() < tracking["yaw_deadband"], 0.0)
+        yaw_target = yaw
+        if not getattr(env, "heading_hold_enabled", False):
+            yaw_target = yaw.masked_fill(yaw.abs() < tracking["yaw_deadband"], 0.0)
         gx, gy = gravity[:, :2].unbind(dim=1)
         measured_forward = lin_vel[:, 0] * gravity[:, 1:].norm(dim=1)
         forward_error = forward_target - measured_forward

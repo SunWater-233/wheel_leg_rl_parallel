@@ -1,5 +1,6 @@
 # 从稳定的 V0.2 策略开始训练华南虎贴地跑场。后续可逐段提高地形缩放。
 [task]
+use_cad_base_hull = true
 forward_command = [-1.6, 1.6]
 yaw_command = [-4.0, 4.0]
 
@@ -17,7 +18,7 @@ height_maneuvers = true
 stationary_episode_fraction = 0.10
 launch_press_seconds = [0.24, 0.70, 3.50, 5.50]
 launch_stop_seconds = [0.50, 1.10, 1.80]
-speed_maneuver_weights = [0.05, 0.15, 0.07, 0.08, 0.10, 0.40, 0.15]
+speed_maneuver_weights = [0.03, 0.21, 0.07, 0.13, 0.20, 0.28, 0.08]
 command_speed_levels = [0.8, 1.2, 1.6]
 command_acceleration_levels = [0.45, 0.60, 0.95]
 command_acceleration_weights = [0.25, 0.60, 0.15]
@@ -25,9 +26,18 @@ manual_forward_acceleration = 0.60
 terrain = "scut_ground"
 terrain_traversal = true
 terrain_forward_limit = 0.80
-scut_ground_scale = 0.65
-scut_ground_bars_fraction = 0.18
-scut_ground_bars_reverse_probability = 0.75
+scut_ground_scale = 0.80
+scut_ground_bars_fraction = 0.20
+scut_ground_bars_reverse_probability = 0.60
+scut_ground_bars_variant_weights = [0.30, 0.45, 0.25]
+scut_ground_bars_speed_levels = [0.50, 0.60, 0.70]
+scut_ground_compound_fraction = 0.14
+scut_ground_rough_slope_variant_weights = [0.20, 0.35, 0.45]
+scut_ground_rough_slope_low_height_probability = 0.75
+scut_ground_single_side_fraction = 0.08
+
+[task.locomotion.heading_hold]
+enabled = true
 
 [task.scut_rough_reward.tracking]
 forward_deadband = 0.025
@@ -54,3 +64,7 @@ recovery_speed_weight = 0.65
 
 [ppo]
 save_interval = 40
+max_action_std = 0.16
+
+[ppo.algorithm]
+entropy_coef = 0.001

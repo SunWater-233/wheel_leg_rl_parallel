@@ -5,6 +5,7 @@ import xml.etree.ElementTree as ET
 import genesis as gs
 import mujoco
 import numpy as np
+from scipy.spatial import ConvexHull
 
 from configs.experiment import TRAINING_DIR
 from envs.flat import FlatEnv
@@ -38,8 +39,23 @@ def _vector(values):
     return " ".join(f"{value:.10g}" for value in values)
 
 
-def _collision_model(path, *, include_visuals=False):
-    """Fit one collider per rigid body and preserve the CAD joint tree and inertials."""
+def _add_cad_hull(assets, body, points, geom_attrs):
+    hull = ConvexHull(points)
+    vertices = points[hull.vertices]
+    vertex_indices = np.empty(len(points), dtype=np.intp)
+    vertex_indices[hull.vertices] = np.arange(len(vertices))
+    face_indices = vertex_indices[hull.simplices]
+    triangles = vertices[face_indices]
+    winding = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    inward = np.einsum("ij,ij->i", winding, hull.equations[:, :3]) < 0.0
+    face_indices[inward] = face_indices[inward, ::-1]
+    ET.SubElement(assets, "mesh", name="base_link_cad_hull", vertex=_vector(vertices.ravel()),
+                  face=" ".join(map(str, face_indices.ravel())))
+    ET.SubElement(body, "geom", name="base_link_contact", type="mesh", mesh="base_link_cad_hull", **geom_attrs)
+
+
+def _collision_model(path, *, include_visuals=False, use_cad_base_hull=False):
+    """Fit one collider per rigid body while preserving the CAD joint tree and inertials."""
     xml = ET.parse(path).getroot()
     cad = mujoco.MjModel.from_xml_path(str(path.resolve()))
     world = xml.find("worldbody")
@@ -53,6 +69,8 @@ def _collision_model(path, *, include_visuals=False):
         compiler.set("meshdir", (path.resolve().parent / mesh_dir).as_posix())
     else:
         xml.remove(xml.find("asset"))
+        if use_cad_base_hull:
+            ET.SubElement(xml, "asset")
     # Genesis renders groups 0–2 by default. Group 3 keeps these geoms collision-only.
     collision_group = {"group": "3"} if include_visuals else {}
     for body in world.iter("body"):
@@ -73,7 +91,9 @@ def _collision_model(path, *, include_visuals=False):
             else:
                 body.remove(geom)
 
-        if name.startswith(("wheel_", "guide_")):
+        if name == "base_link" and use_cad_base_hull:
+            _add_cad_hull(xml.find("asset"), body, points, {"rgba": "0.55 0.62 0.7 1", **collision_group})
+        elif name.startswith(("wheel_", "guide_")):
             joint = cad.joint(cad.body_jntadr[body_id])
             offset = points - joint.pos
             axial = offset @ joint.axis
@@ -112,7 +132,8 @@ class WheelLegFlatEnv(FlatEnv):
     expected_equalities = 12
 
     def _robot_morph(self, model_path, viewer):
-        return gs.morphs.MJCF(file=_collision_model(model_path, include_visuals=viewer),
+        return gs.morphs.MJCF(file=_collision_model(model_path, include_visuals=viewer,
+                                                  use_cad_base_hull=self.cfg["use_cad_base_hull"]),
                               visualization=viewer, default_armature=1e-4)
 
     def _set_home_pose(self):

@@ -1,6 +1,7 @@
 [task]
 episode_seconds = 20.0        # 单个训练回合的最长时间，单位为秒
 friction = 0.8                # 地面接触摩擦系数
+use_cad_base_hull = false     # V0.2 使用 CAD 外形凸包作为车身碰撞体
 forward_command = [-0.5, 0.5] # 纵向速度指令范围，单位为米/秒，负值表示后退
 yaw_command = [-0.5, 0.5]     # 车身转向角速度指令范围，单位为弧度/秒
 
@@ -163,6 +164,7 @@ joint_velocity = 0.0 # 关节角速度，单位为弧度/秒，在观测缩放�
 # 连续腿高任务的指令、训练动作和地形。
 [task.locomotion]
 enabled = false                   # 是否启用连续腿高任务
+critic_terrain_observations = false # 向 critic 提供轮子接触和轮边地形高度
 leg_torque_limit = 12.0           # 单个主动腿关节的力矩上限，单位为牛·米
 height_range = [0.17, 0.20]       # 腿高指令范围，按髋关节到轮心的竖直距离计算，单位为米
 height_lowering_schedule = []     # 逐步降低腿高采样下限，每项为 [PPO 迭代轮数, 最低腿高（米）]
@@ -192,16 +194,29 @@ terrain_forward_limit = 0.0       # 非平地巡航指令的速度上限，单�
 scut_ground_scale = 1.0           # scut_ground 地形的垂直缩放比例，坡度和障碍高度一同缩放
 scut_ground_bars_fraction = 0.10  # scut_ground 中交叉凸条的回合占比，平地仍占 40%
 scut_ground_bars_reverse_probability = 0.50 # scut_ground 凸条回合中倒车通过的概率
+scut_ground_compound_fraction = 0.0 # 粗糙坡道和错位凸条的总占比，平地仍占 40%
+scut_ground_single_side_fraction = 0.0 # 左右单侧凸条的总占比
+scut_ground_bars_variant_weights = [] # 普通交叉凸条的三档采样权重
+scut_ground_bars_speed_levels = [] # 普通交叉凸条按回合抽取的巡航速度档位，单位为米/秒
+scut_ground_rough_slope_variant_weights = [] # 粗糙坡道的三档采样权重
+scut_ground_rough_slope_low_height_probability = 0.0 # 粗糙坡道回合中将目标腿高限制在标称腿高以下的概率
 terrain_seed = 42                 # 地形生成的随机种子
 cliff_drop_heights = []           # 华南虎赛道上三档向前落差的高度，单位为米
 slope_degrees = [3.0, 6.0]        # 混合地形的坡度范围，单位为度
 roughness = 0.005                 # 粗糙地形的随机起伏幅度，单位为米
 obstacle_height = [0.005, 0.010]  # 凸条和小台阶的高度范围，单位为米
 
+[task.locomotion.heading_hold]
+enabled = false             # 零转向指令时锁定当前航向
+gain = 2.5                  # 航向角误差转换为转向角速度的比例系数，单位为 1/s
+deadband_deg = 0.5           # 航向锁定允许的误差角度
+max_yaw_rate = 0.40          # 航向修正角速度上限，单位为 rad/s
+
 # PPO 每轮的采样和保存设置。
 [ppo]
 num_steps_per_env = 24 # 每轮更新前，每个环境采集的仿真步数
 save_interval = 500    # 每隔多少轮保存一次模型检查点
+max_action_std = 0.0   # 每个动作探索标准差的上限，0 表示沿用 PPO 默认行为
 
 [ppo.policy]
 actor_hidden_dims = [256, 128, 64]  # 动作网络各隐藏层的神经元数量

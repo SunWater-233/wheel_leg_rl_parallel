@@ -75,18 +75,22 @@ uv run --locked main.py demo --checkpoint outputs/v02_height_33_40nm/model_599.p
 
 ### 华南虎贴地跑场
 
-用 [v02_scut_ground.toml](configs/v02_scut_ground.toml) 训练一个 policy。地形以华南虎 V14 Rough-v1 的跑场形状为参考，包含平地、凸坡、凹坡、随机粗糙面、交叉凸条、连续凸阶和两类凹阶。非平地以 55%、30%、15% 的概率抽取三档难度，从赛道两端出发直行，速度请求为 0.52–0.80 m/s。当前阶段的地形均为贴地通过。
+用 [v02_scut_ground.toml](configs/v02_scut_ground.toml) 训练一个 policy。地形以华南虎 V14 Rough-v1 的跑场形状为参考，包含平地、凸坡、凹坡、随机粗糙面、交叉凸条、连续凸阶和两类凹阶。常规非平地从赛道两端出发直行，默认以 55%、30%、15% 的概率抽取三档难度，巡航速度请求为 0.52–0.80 m/s。当前阶段的地形均为贴地通过。
 
-平地占 40%，赛道约 24 m 长，保留驻车、缓起缓停、重复启停、快转和升降。训练腿高覆盖 17–33 cm，回合内连续调整。当前配置将凸条回合提高到 18%，其中 75% 倒车通过，其余非平地按原比例缩放。平地接地时额外惩罚横滚误差和横滚角速度。
+平地占 40%，赛道约 24 m 长。平地回合中 10% 驻车，其余按 3% 随机指令、21% 直线加减速与换向、7% 原地转向、13% 行进转弯、20% 弯中制动、28% 反复启停、8% 升降采样。加减速度上限取 0.45、0.60、0.95 m/s²。平地接地时额外惩罚横滚误差和横滚角速度。
+
+普通交叉凸条占 20%，其中 60% 倒车通过。三档地形按 30%、45%、25% 采样，每回合从 0.50、0.60、0.70 m/s 抽一个巡航速度。粗糙坡道和错位凸条各占 7%，粗糙坡道的 75% 回合将腿高目标限制在 17–20 cm。左右单侧凸条各占 4%，每道凸条只覆盖一侧轮迹，每条赛道交替左右，训练速度为 0.40–0.60 m/s。其余回合仍覆盖 17–33 cm 连续腿高。
+
+`task.use_cad_base_hull` 从 CAD 车身外形生成底盘凸包，避免旧长方盒的空角刮坡触发重置。生成时沿用 CAD 关节树、质量和惯量。
 
 ```powershell
-uv run --locked main.py train --config configs/v02_scut_ground.toml --resume outputs/v02_scut_ground_065_20261123_031406/artifacts/model_499.pt --backend cuda --num-envs 4096 --iterations 500 --output outputs/v02_scut_ground_065_focus --live-port 6013 --live-stream --live-fps 8
-uv run --locked main.py demo --checkpoint outputs/v02_scut_ground_065_focus/model_999.pt --surface bars --terrain-variant 3 --terrain-seed 101 --num-envs 1 --seconds 13 --speed -0.70 --height 0.20 --viewer
+uv run --locked main.py train --config configs/v02_scut_ground.toml --init-checkpoint outputs/v02_scut_ground_080_hjc_resume_20261123_054640/artifacts/model_2599.pt --backend cuda --num-envs 1536 --iterations 120 --output outputs/v02_scut_ground_080_std_cap --live-port 6015 --live-stream --live-fps 6
+uv run --locked main.py demo --checkpoint outputs/v02_scut_ground_080_std_cap/model_119.pt --surface single_side_bars_left --terrain-variant 3 --terrain-seed 101 --num-envs 1 --seconds 17 --speed -0.55 --height 0.20 --viewer
 ```
 
-先验证 `scut_ground_scale = 0.65`，再根据结果分阶段提高到 `0.80` 和 `1.00`。每阶段从上一阶段通过验证的检查点初始化，使用独立输出目录以保留配置快照。回放逐地形按 1–3 档、两方向、17/20/33 cm 验证，确认确实穿过障碍，并记录倒地、pitch、roll、速度恢复和限矩。随机路面用不同种子复测。平地单独回归驻车、快转、升降和 1.6 m/s 启停。地形效果稳定后，再单独加入地面摩擦、载荷、关节摩擦和观测噪声的随机化。
+当前地形强度为 `0.80`。短训从 `model_2599.pt` 初始化 actor 和 critic，并使用新优化器。熵系数为 `0.001`，每个动作的探索标准差上限为 `0.16`，TensorBoard 可查看 `Policy/max_noise_std`。回放逐地形按 1–3 档、两方向、17/20/33 cm 验证，确认确实穿过障碍，并记录倒地、pitch、roll、速度恢复和限矩。随机路面用不同种子复测，平地另外回归驻车、快转、升降和 1.6 m/s 启停。
 
-`--surface` 可选 `flat`、`slope`、`inv_slope`、`rough`、`bars`、`stairs`、`inv_stairs_low`、`inv_stairs_high`。通过 `--terrain-variant` 选择难度，正负 `--speed` 检查两个方向。TensorBoard 的 `Episode/terrain_progress_m` 记录车体相对出生点的最大纵向位移。
+`--surface` 可选 `flat`、`slope`、`inv_slope`、`rough`、`bars`、`stairs`、`inv_stairs_low`、`inv_stairs_high`。启用复合地形后可选 `rough_slope` 和 `staggered_bars`，启用单侧凸条后可选 `single_side_bars_left` 和 `single_side_bars_right`。通过 `--terrain-variant` 选择难度，正负 `--speed` 检查两个方向。TensorBoard 的 `Episode/terrain_progress_m` 记录车体相对出生点的最大纵向位移。
 
 ## 旧平地 PPO 短训与回放
 

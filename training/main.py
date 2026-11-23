@@ -17,7 +17,7 @@ import torch
 
 from configs.experiment import (MAX_FORWARD_SPEED, SNAPSHOT_NAME, TRAINING_DIR, load_config, load_snapshot,
                                 runner_config, save_run_config)
-from envs.terrain import SCUT_V1_SURFACES, TERRAIN_LANES
+from envs.terrain import SCUT_GROUND_COMPOUND_SURFACES, SCUT_GROUND_SINGLE_SIDE_SURFACES, SCUT_V1_SURFACES, TERRAIN_LANES
 from robots.scut import WheelbipeFlatEnv
 from robots.wheel_leg import WheelLegFlatEnv
 from robots.wheel_leg_locomotion import WheelLegLocomotionEnv
@@ -26,12 +26,31 @@ from tools.live_view import TrainingView
 
 class RobotRunner(OnPolicyRunner):
     live_view = None
+    capped_action_std = None
 
     def save(self, path, infos=None):
         super().save(path, {**(infos or {}), "robot": self.env.label, "task": self.env.task_name})
 
+    def limit_exploration(self, maximum):
+        if not maximum:
+            return
+        std = getattr(self.alg.policy, "std", None)
+        if not isinstance(std, torch.nn.Parameter):
+            raise ValueError("ppo.max_action_std requires a per-action standard deviation parameter")
+
+        @torch.no_grad()
+        def clamp_std(*_):
+            std.clamp_(min=1e-6, max=maximum)
+
+        clamp_std()
+        self.alg.optimizer.register_step_post_hook(clamp_std)
+        self.capped_action_std = std
+        print(f"Per-action exploration std capped at {maximum:g}", flush=True)
+
     def log(self, locs, width=80, pad=35):
         super().log(locs, width, pad)
+        if self.capped_action_std is not None:
+            self.writer.add_scalar("Policy/max_noise_std", self.capped_action_std.detach().max().item(), locs["it"])
         if self.live_view is None:
             return
         batch_size = self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
@@ -51,7 +70,22 @@ class RobotRunner(OnPolicyRunner):
 
 
 def load_checkpoint(runner, path, *, load_optimizer):
-    info = runner.load(str(path), load_optimizer=load_optimizer, map_location=str(runner.env.device)) or {}
+    def add_critic_inputs(module, state, prefix, *_):
+        name = f"{prefix}critic.0.weight"
+        old = state.get(name)
+        weight = module.critic[0].weight
+        extra_dims = runner.env.critic_terrain_dims
+        if old is None or old.shape != (weight.shape[0], weight.shape[1] - extra_dims):
+            return
+        if load_optimizer:
+            raise ValueError("Use --init-checkpoint to add terrain observations to an existing critic")
+        state[name] = torch.nn.functional.pad(old, (0, extra_dims))
+        print(f"Initialized {extra_dims} terrain critic inputs with zero weights", flush=True)
+
+    with ExitStack() as stack:
+        if isinstance(runner.env, WheelLegLocomotionEnv) and runner.env.critic_scan_offsets is not None:
+            stack.enter_context(runner.alg.policy.register_load_state_dict_pre_hook(add_critic_inputs))
+        info = runner.load(str(path), load_optimizer=load_optimizer, map_location=str(runner.env.device)) or {}
     # Checkpoints before robot metadata was added only used the SCUT model.
     checkpoint_robot = info.get("robot", WheelbipeFlatEnv.label)
     if checkpoint_robot != runner.env.label:
@@ -75,6 +109,7 @@ def train(env, options, output, settings, live_view=None):
         load_checkpoint(runner, options.init_checkpoint, load_optimizer=False)
         runner.current_learning_iteration = 0
         print(f"Initializing from {options.init_checkpoint} with a fresh optimizer", flush=True)
+    runner.limit_exploration(settings["ppo"]["max_action_std"])
     if isinstance(env, WheelLegLocomotionEnv):
         env.start_height_curriculum(runner.current_learning_iteration, runner.num_steps_per_env)
     save_run_config(output, settings, options, type(env), env.num_envs)
@@ -349,7 +384,8 @@ def main():
     heights.add_argument("--height", type=float, help="Demo hip-to-wheel height in meters")
     heights.add_argument("--height-sequence", type=float, nargs="+", help="Successive demo leg-height targets in meters")
     parser.add_argument("--height-hold", type=float, default=2.0, help="Seconds between demo height targets")
-    parser.add_argument("--surface", choices=SCUT_V1_SURFACES, help="Spawn on this lane when replaying a terrain policy")
+    parser.add_argument("--surface", choices=SCUT_V1_SURFACES + SCUT_GROUND_COMPOUND_SURFACES + SCUT_GROUND_SINGLE_SIDE_SURFACES,
+                        help="Spawn on this lane when replaying a terrain policy")
     parser.add_argument("--terrain-variant", type=int, help="Select a 1-based lane difficulty when replaying")
     parser.add_argument("--terrain-seed", type=int, help="Override the mixed-terrain layout seed")
     parser.add_argument("--forward-limit", type=float, help="Override the training speed range with this symmetric limit")
@@ -443,7 +479,7 @@ def main():
         parser.error("Body heights require a locomotion checkpoint and finite targets")
     lane_class = TERRAIN_LANES.get(locomotion["terrain"])
     if args.surface:
-        if not locomotion["enabled"] or lane_class is None or args.surface not in lane_class.surfaces:
+        if not locomotion["enabled"] or lane_class is None or args.surface not in lane_class.surface_names(locomotion):
             parser.error("--surface must name a lane in the selected locomotion terrain")
         if args.surface == "cliff" and locomotion["cliff_drop_heights"] and args.speed < 0 and not args.keyboard:
             parser.error("The cliff drop requires a positive forward speed")

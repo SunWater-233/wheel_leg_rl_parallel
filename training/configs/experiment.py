@@ -82,6 +82,16 @@ def _validate_settings(settings):
             raise ValueError(f"task.observation_noise.{name} must be finite and nonnegative")
 
     locomotion = task["locomotion"]
+    if locomotion["critic_terrain_observations"] and not locomotion["enabled"]:
+        raise ValueError("Terrain observations for the critic require enabled locomotion")
+    heading_hold = locomotion["heading_hold"]
+    if heading_hold["enabled"] and not locomotion["enabled"]:
+        raise ValueError("Heading hold requires enabled locomotion")
+    for name in ("gain", "max_yaw_rate"):
+        if not isfinite(heading_hold[name]) or heading_hold[name] <= 0.0:
+            raise ValueError(f"task.locomotion.heading_hold.{name} must be finite and positive")
+    if not 0.0 <= heading_hold["deadband_deg"] < 180.0:
+        raise ValueError("task.locomotion.heading_hold.deadband_deg must be in [0, 180)")
     if task["scut_rough_reward"]["braking"]["enabled"] and not locomotion["enabled"]:
         raise ValueError("The braking reward requires enabled locomotion")
     tracking = task["scut_rough_reward"]["tracking"]
@@ -129,6 +139,7 @@ def _validate_settings(settings):
         )):
             raise ValueError(f"{name} requires launch_maneuvers and positive durations shorter than an episode")
     for name, maximum in (("command_speed_levels", MAX_FORWARD_SPEED),
+                          ("scut_ground_bars_speed_levels", MAX_FORWARD_SPEED),
                           ("command_acceleration_levels", MAX_FORWARD_ACCELERATION)):
         if any(type(value) not in (int, float) or not 0 < value <= maximum for value in locomotion[name]):
             raise ValueError(f"{name} must contain positive levels up to {maximum:g}")
@@ -137,7 +148,9 @@ def _validate_settings(settings):
         if locomotion["speed_maneuvers"] else 0
     )
     for name, length in (("speed_maneuver_weights", maneuver_count),
-                         ("command_acceleration_weights", len(locomotion["command_acceleration_levels"]))):
+                         ("command_acceleration_weights", len(locomotion["command_acceleration_levels"])),
+                         ("scut_ground_bars_variant_weights", 3),
+                         ("scut_ground_rough_slope_variant_weights", 3)):
         weights = locomotion[name]
         if weights and (len(weights) != length or any(
             type(value) not in (int, float) or not isfinite(value) or value < 0 for value in weights
@@ -159,10 +172,23 @@ def _validate_settings(settings):
         raise ValueError("scut_ground_scale must be in [0.50, 1.0] and is only adjustable on scut_ground")
     bars_fraction = locomotion["scut_ground_bars_fraction"]
     bars_reverse = locomotion["scut_ground_bars_reverse_probability"]
-    if not 0.0 <= bars_fraction <= 0.60 or not 0.0 <= bars_reverse <= 1.0:
-        raise ValueError("scut_ground bars fraction must be in [0, 0.60] and reverse probability in [0, 1]")
-    if (bars_fraction != 0.10 or bars_reverse != 0.50) and terrain != "scut_ground":
-        raise ValueError("The scut_ground bars sampling settings require scut_ground terrain")
+    compound_fraction = locomotion["scut_ground_compound_fraction"]
+    single_side_fraction = locomotion["scut_ground_single_side_fraction"]
+    low_rough_slope = locomotion["scut_ground_rough_slope_low_height_probability"]
+    obstacle_fractions = (bars_fraction, compound_fraction, single_side_fraction)
+    if (any(not 0.0 <= fraction <= 0.60 for fraction in obstacle_fractions)
+            or sum(obstacle_fractions) > 0.60):
+        raise ValueError("scut_ground bars, compound and single-side fractions must sum to at most 0.60")
+    if not (0.0 <= bars_reverse <= 1.0 and 0.0 <= low_rough_slope <= 1.0):
+        raise ValueError("scut_ground reverse and low-height probabilities must be in [0, 1]")
+    rough_slope_focus = low_rough_slope or locomotion["scut_ground_rough_slope_variant_weights"]
+    if rough_slope_focus and not compound_fraction:
+        raise ValueError("Rough-slope sampling requires a positive scut_ground_compound_fraction")
+    has_scut_sampling = (bars_fraction != 0.10 or bars_reverse != 0.50 or compound_fraction or single_side_fraction
+                         or rough_slope_focus or locomotion["scut_ground_bars_variant_weights"]
+                         or locomotion["scut_ground_bars_speed_levels"])
+    if has_scut_sampling and terrain != "scut_ground":
+        raise ValueError("The scut_ground sampling settings require scut_ground terrain")
     drops = locomotion["cliff_drop_heights"]
     if drops and (terrain != "scut_v1" or len(drops) != 3
                   or any(type(drop) not in (int, float) or not 0.04 <= drop <= 0.40 for drop in drops)
@@ -207,6 +233,9 @@ def _validate_settings(settings):
     for name in ("num_steps_per_env", "save_interval"):
         if ppo[name] <= 0:
             raise ValueError(f"ppo.{name} must be positive")
+    max_action_std = ppo["max_action_std"]
+    if not isfinite(max_action_std) or (max_action_std != 0.0 and max_action_std < 1e-6):
+        raise ValueError("ppo.max_action_std must be zero or a finite value of at least 1e-6")
     for name in ("num_learning_epochs", "num_mini_batches"):
         if ppo["algorithm"][name] <= 0:
             raise ValueError(f"ppo.algorithm.{name} must be positive")
@@ -245,6 +274,7 @@ def load_config(path=None):
 def runner_config(ppo):
     # RSL-RL removes class names and alters the configuration it receives.
     config = deepcopy(ppo)
+    config.pop("max_action_std", None)
     config["obs_groups"] = {"policy": ["policy"], "critic": ["critic"]}
     config["policy"]["class_name"] = "ActorCritic"
     config["algorithm"]["class_name"] = "PPO"

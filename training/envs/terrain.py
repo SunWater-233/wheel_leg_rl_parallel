@@ -11,6 +11,7 @@ SCUT_V1_SURFACES = SURFACES + ("inv_slope", "inv_stairs_low", "inv_stairs_high",
 SCUT_GROUND_SURFACES = SURFACES + ("inv_slope", "inv_stairs_low", "inv_stairs_high")
 SCUT_GROUND_COMPOUND_SURFACES = ("rough_slope", "staggered_bars")
 SCUT_GROUND_SINGLE_SIDE_SURFACES = ("single_side_bars_left", "single_side_bars_right")
+SCUT_GROUND_SPEED_BUMP = "speed_bump"
 SURFACE_STYLES = {
     "flat": ("平地", (116, 141, 160)),
     "slope": ("坡道", (112, 157, 123)),
@@ -27,7 +28,14 @@ SURFACE_STYLES = {
     "staggered_bars": ("错位凸条", (185, 130, 90)),
     "single_side_bars_left": ("单侧凸条（左轮先过）", (174, 116, 86)),
     "single_side_bars_right": ("单侧凸条（右轮先过）", (177, 100, 83)),
+    SCUT_GROUND_SPEED_BUMP: ("曲面减速带", (191, 144, 79)),
+    "transitions": ("随机地形过渡", (132, 145, 121)),
 }
+
+
+def raised_cosine_profile(x, length):
+    """Unit-height bump with zero height and slope at both ends."""
+    return 0.5 * (1 + np.cos(np.pi * np.clip(2 * x / length, -1, 1)))
 
 
 class TerrainLanes:
@@ -76,8 +84,23 @@ class TerrainLanes:
                 self.field[:, section] = np.rint(rough / self.vertical_scale).astype(np.int16)
         self.field[:, -1] = self.field[:, -2]
 
-    def morph(self, viewer):
-        return gs.morphs.Terrain(pos=(-self.half_length, 0.0, 0.0), height_field=self.field,
+    def lane_columns(self, lane):
+        if lane is None:
+            return slice(0, self.field.shape[1])
+        width = round(self.lane_width / self.spacing)
+        # Include both wheel footprints and terrain scan points just outside the lane.
+        padding = round(1.0 / self.spacing)
+        return slice(max(0, lane * width - padding),
+                     min(self.field.shape[1], (lane + 1) * width + padding + 1))
+
+    @property
+    def width(self):
+        return (self.field.shape[1] - 1) * self.spacing
+
+    def morph(self, viewer, lane=None):
+        section = self.lane_columns(lane)
+        return gs.morphs.Terrain(pos=(-self.half_length, section.start * self.spacing, 0.0),
+                                 height_field=self.field[:, section],
                                  horizontal_scale=self.spacing, vertical_scale=self.vertical_scale,
                                  visualization=viewer)
 
@@ -86,15 +109,16 @@ class TerrainLanes:
         name = SURFACE_STYLES[surface][0]
         return name if surface == "flat" else f"{name} · 档位 {variant + 1}/{self.variants}"
 
-    def visual_surface(self):
+    def visual_surface(self, lane=None):
         """Paint each lane and darken terrain edges using the same height field as collision."""
-        heights = self.field.astype(np.float32) * self.vertical_scale
+        section = self.lane_columns(lane)
+        heights = self.field[:, section].astype(np.float32) * self.vertical_scale
         across, along = np.gradient(heights)
         edge = np.clip(np.maximum(np.abs(across), np.abs(along)) / 0.035, 0.0, 1.0)
         bands = np.floor(np.abs(heights) / 0.10) % 2
         shade = 1.0 + 0.28 * np.clip(heights / 0.20, -1.0, 1.0) - 0.36 * edge - 0.08 * bands
         lane_width = round(self.lane_width / self.spacing)
-        columns = np.arange(heights.shape[1])
+        columns = np.arange(section.start, section.stop)
         lane = (columns // lane_width).clip(max=len(self.centers) - 1)
         colors = np.array([SURFACE_STYLES[surface][1] for surface in self.surfaces])
         rgb = colors[lane // self.variants] * shade[..., None]
@@ -134,7 +158,8 @@ class ScutV1Lanes(TerrainLanes):
         rng = np.random.default_rng(settings["terrain_seed"])
         half_cells = round(self.half_length / self.spacing)
         x = np.arange(-half_cells, half_cells + 1) * self.spacing
-        y = np.arange(-45, 45) * self.spacing
+        half_lane_cells = round(self.lane_width / (2 * self.spacing))
+        y = np.arange(-half_lane_cells, half_lane_cells) * self.spacing
         width = len(y)
         radius = np.maximum(np.abs(x)[:, None], np.abs(y)[None, :])
         self.centers = (0.5 + np.arange(len(self.surfaces) * self.variants)) * self.lane_width
@@ -177,7 +202,7 @@ class ScutV1Lanes(TerrainLanes):
         if surface in self.stairs:
             heights, tread, platform, border, sign = self.stairs[surface]
             riser = self.vertical_scale * np.rint(np.interp(difficulty, (0.0, 1.0), heights) / self.vertical_scale)
-            outer = self.lane_width / 2 - border
+            outer = ScutV1Lanes.lane_width / 2 - border
             depth = np.clip(outer - radius, 0.0, outer - platform / 2)
             return sign * riser * np.floor(depth / tread + 1e-8)
         if surface == "slope":
@@ -195,8 +220,9 @@ class ScutV1Lanes(TerrainLanes):
             half_cell = max(width, self.spacing) / 2 + 1e-8
             return height * ((across <= half_cell) | (along <= half_cell)) * (radius <= 3.5)
         if surface == "rough":
-            coarse = rng.integers(0, 7, (len(x) // 2 + 1, len(y) // 2 + 1)) * self.vertical_scale
-            rough = np.repeat(np.repeat(coarse, 2, axis=0), 2, axis=1)[:len(x), :len(y)]
+            cells = round(0.20 / self.spacing)
+            coarse = rng.integers(0, 7, (len(x) // cells + 1, len(y) // cells + 1)) * self.vertical_scale
+            rough = np.repeat(np.repeat(coarse, cells, axis=0), cells, axis=1)[:len(x), :len(y)]
             return rough * (radius <= 3.5)
         if surface == "cliff":
             offset = np.interp(difficulty, (0.0, 1.0), (0.30, 0.40))
@@ -221,6 +247,8 @@ class ScutGroundLanes(ScutV1Lanes):
             surfaces += SCUT_GROUND_COMPOUND_SURFACES
         if settings["scut_ground_single_side_fraction"]:
             surfaces += SCUT_GROUND_SINGLE_SIDE_SURFACES
+        if settings["scut_ground_speed_bump_fraction"]:
+            surfaces += (SCUT_GROUND_SPEED_BUMP,)
         return surfaces
 
     def __init__(self, settings):
@@ -230,6 +258,13 @@ class ScutGroundLanes(ScutV1Lanes):
         fraction = settings["scut_ground_bars_fraction"]
         compound_fraction = settings["scut_ground_compound_fraction"]
         single_side_fraction = settings["scut_ground_single_side_fraction"]
+        bump_fraction = settings["scut_ground_speed_bump_fraction"]
+        if bump_fraction:
+            self.spacing = 0.05
+            self.lane_width = 4.0
+            self.lateral_limit = 1.8
+            self.bump_heights = settings["scut_ground_speed_bump_height"]
+            self.bump_length = settings["scut_ground_speed_bump_length"]
         self.reverse_probabilities = tuple(
             settings["scut_ground_bars_reverse_probability"] if index == bars else 0.5
             for index in range(len(self.surfaces))
@@ -243,9 +278,9 @@ class ScutGroundLanes(ScutV1Lanes):
             self.surface_variant_weights = tuple(
                 variant_overrides.get(surface) or self.variant_weights for surface in self.surfaces
             )
-        if compound_fraction or single_side_fraction or fraction != self.surface_weights[bars]:
+        if compound_fraction or single_side_fraction or bump_fraction or fraction != self.surface_weights[bars]:
             obstacle_fraction = 1.0 - self.surface_weights[0]
-            other_scale = ((obstacle_fraction - fraction - compound_fraction - single_side_fraction)
+            other_scale = ((obstacle_fraction - fraction - compound_fraction - single_side_fraction - bump_fraction)
                            / (obstacle_fraction - self.surface_weights[bars]))
             self.surface_weights = (self.surface_weights[0], *(
                 fraction if index == bars else weight * other_scale
@@ -257,9 +292,15 @@ class ScutGroundLanes(ScutV1Lanes):
             if single_side_fraction:
                 count = len(SCUT_GROUND_SINGLE_SIDE_SURFACES)
                 self.surface_weights += (single_side_fraction / count,) * count
+            if bump_fraction:
+                self.surface_weights += (bump_fraction,)
         super().__init__(settings)
 
     def _tile(self, surface, difficulty, x, y, radius, rng):
+        if surface == SCUT_GROUND_SPEED_BUMP:
+            height = np.interp(difficulty, (0.0, 1.0), self.bump_heights)
+            across = np.clip((0.80 - np.abs(y)) / 0.05, 0.0, 1.0)
+            return height * raised_cosine_profile(x, self.bump_length)[:, None] * across
         if surface == "rough_slope":
             slope = super()._tile("slope", difficulty, x, y, radius, rng)
             rough = super()._tile("rough", difficulty, x, y, radius, rng)
@@ -290,4 +331,82 @@ class ScutGroundLanes(ScutV1Lanes):
         return profile * self.scale
 
 
-TERRAIN_LANES = {"mixed": TerrainLanes, "scut_v1": ScutV1Lanes, "scut_ground": ScutGroundLanes}
+class TransitionLanes(ScutV1Lanes):
+    """Seeded sequences of distinct surfaces, with explicit traversable joins and drops."""
+
+    surfaces = ("flat", "transitions")
+    surface_weights = (0.35, 0.65)
+    variants = 8
+    variant_weights = (1 / variants,) * variants
+    spacing = 0.05
+    lane_width = 4.0
+    lateral_limit = 1.8
+    half_length = 12.0
+    travel_limit = 11.6
+    approach_x = 4.2
+    seams = (-2.8, 0.0, 2.8)
+    families = ("flat", "slope", "rough", "stairs", "rough_slope")
+
+    def __init__(self, settings):
+        rng = np.random.default_rng(settings["terrain_seed"])
+        cells = round(self.half_length / self.spacing)
+        x = np.arange(-cells, cells + 1) * self.spacing
+        width = round(self.lane_width / self.spacing)
+        self.centers = (0.5 + np.arange(2 * self.variants)) * self.lane_width
+        self.field = np.zeros((x.size, 2 * self.variants * width + 1), dtype=np.int16)
+        self.spawn_x = np.zeros_like(self.centers)
+        self.spawn_x[self.variants:] = self.approach_x
+        self.spawn_z = np.zeros_like(self.centers)
+        self.reverse_spawn_z = np.zeros_like(self.centers)
+        self.forward_only = np.zeros_like(self.centers, dtype=bool)
+        self.drop_decks = []
+        self.segment_families = []
+        self.seam_steps = []
+        for variant in range(self.variants):
+            families = tuple(rng.choice(self.families, 4, replace=False))
+            joins = rng.choice((0.0, 0.0, 0.025, 0.045, 0.065, 0.085), len(self.seams))
+            joins *= rng.choice((-1, 1), len(self.seams))
+            # A minority of lanes reproduce the larger downward cross-lane step seen in free drive.
+            if variant % 3 == 2:
+                joins[rng.integers(len(joins))] = -rng.uniform(0.12, 0.18)
+                self.forward_only[self.variants + variant] = True
+            self.segment_families.append(families)
+            self.seam_steps.append(tuple(joins))
+            breaks = (-4.0, *self.seams, 4.0)
+            skew = rng.uniform(-0.22, 0.22) * (np.arange(width) * self.spacing - self.lane_width / 2)
+            local_x = x[:, None] - skew
+            baseline = 0.0
+            profiles = []
+            for i, (kind, start, end) in enumerate(zip(families, breaks, breaks[1:])):
+                if i:
+                    baseline = profiles[-1][1] + joins[i - 1]
+                length = end - start
+                grade = rng.uniform(0.07, 0.21) * rng.choice((-1, 1)) if kind in ("slope", "rough_slope") else 0.0
+                rise = rng.uniform(0.010, 0.025) * rng.choice((-1, 1)) if kind == "stairs" else 0.0
+                steps = 7
+                dx = (local_x - start).clip(0, length)
+                risers = np.floor(dx * (steps + 1) / length + 1e-8).clip(0, steps)
+                tile = baseline + grade * dx + rise * risers
+                if kind in ("rough", "rough_slope"):
+                    block = 4
+                    noise = rng.uniform(-1, 1, (x.size // block + 1, width // block + 1))
+                    noise = np.repeat(np.repeat(noise, block, axis=0), block, axis=1)[:x.size, :width]
+                    taper = np.minimum(dx, length - dx).clip(0, 0.22) / 0.22
+                    tile += rng.uniform(0.006, 0.020) * noise * taper
+                profiles.append((tile, baseline + grade * length + rise * steps))
+            grid = profiles[0][0]
+            for seam, step, (tile, _) in zip(self.seams, joins, profiles[1:]):
+                # Continuous joins blend the adjacent grades; nonzero steps retain a sharp lip.
+                blend = np.clip((local_x - seam + 0.18) / 0.36, 0, 1) if not step else (local_x >= seam).astype(float)
+                grid = grid * (1 - blend) + tile * blend
+            section = slice((self.variants + variant) * width, (self.variants + variant + 1) * width)
+            quantized = np.rint(grid / self.vertical_scale).astype(np.int16)
+            self.field[:, section] = quantized
+            approach = round(self.approach_x / self.spacing)
+            self.spawn_z[self.variants + variant] = quantized[cells - approach, width // 2] * self.vertical_scale
+            self.reverse_spawn_z[self.variants + variant] = quantized[cells + approach, width // 2] * self.vertical_scale
+        self.field[:, -1] = self.field[:, -2]
+
+
+TERRAIN_LANES = {"mixed": TerrainLanes, "scut_v1": ScutV1Lanes, "scut_ground": ScutGroundLanes,
+                 "transitions": TransitionLanes}

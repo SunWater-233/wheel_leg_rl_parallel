@@ -37,6 +37,7 @@ flat_roll_error_weight = 0.0    # 平地接地时额外的横滚误差惩罚
 flat_roll_rate_scale = 0.25     # 平地横滚角速度的归一化尺度，单位为弧度/秒
 flat_roll_rate_weight = 0.0     # 平地接地时额外的横滚角速度惩罚
 height_reward_weight = 1.0   # 车身离地高度跟踪的指数奖励权重
+use_projected_leg_height = false # 平地轮腿跟踪髋关节到轮心的矢状面投影高度
 height_error_clip = 0.15     # 计算指数奖励时，高度误差的绝对值最多按此值计，单位为米
 height_error_width = 0.001   # 车身高度跟踪的指数奖励宽度
 height_error_scale = 10.0    # 地面高度误差先乘此值再平方扣分
@@ -70,6 +71,7 @@ airborne_fall_extra_weight = 1000.0           # 腾空阶段被判定倒地时�
 # 限速参考开始向零减速时触发，适用于平地连续腿高任务。
 [task.scut_rough_reward.braking]
 enabled = false
+preserve_across_airborne = false
 start_speed = 0.15          # 开始制动所需的最小参考速度，m/s
 zero_speed = 0.04           # 判定停止指令和零速参考的阈值，m/s
 recovery_seconds = 0.75     # 参考到零后的回正窗口，s
@@ -165,7 +167,10 @@ joint_velocity = 0.0 # 关节角速度，单位为弧度/秒，在观测缩放�
 [task.locomotion]
 enabled = false                   # 是否启用连续腿高任务
 critic_terrain_observations = false # 向 critic 提供轮子接触和轮边地形高度
+actor_true_forward_speed = false # Diagnostic only: expose simulated body-frame vx to the actor.
 leg_torque_limit = 12.0           # 单个主动腿关节的力矩上限，单位为牛·米
+wheel_torque_limit = 5.0          # 单侧轮端伺服的力矩上限，单位为牛·米
+wheel_target_delay_steps = 0      # 轮速目标延迟，按 2 ms 物理步计，最大 9 步
 height_range = [0.17, 0.20]       # 腿高指令范围，按髋关节到轮心的竖直距离计算，单位为米
 height_lowering_schedule = []     # 逐步降低腿高采样下限，每项为 [PPO 迭代轮数, 最低腿高（米）]
 height_nominal = 0.20             # 标称腿高，用于初始化和目标采样，单位为米
@@ -177,6 +182,7 @@ speed_maneuvers = false           # 是否按回合抽取一类速度训练动�
 braking_maneuvers = false         # 是否加入带速入弯后刹停的动作
 launch_maneuvers = false          # 是否加入固定腿高、反复起步和刹停的动作
 height_maneuvers = false          # 是否加入静止或匀速直行时改变腿高的动作
+height_maneuver_sequence = []      # 平地升降回合的循环目标序列 (m)，留空时交替使用腿高范围两端
 stationary_episode_fraction = 0.0 # 平地回合中保持腿高且速度指令为零的比例
 launch_press_seconds = []         # 模拟按住前进或后退键的总时长档位，包含加速时间，单位为秒
 launch_stop_seconds = []          # 刹停后保持零速指令的时长档位，单位为秒
@@ -190,12 +196,17 @@ manual_forward_acceleration = 4.0 # 回放的纵向加减速度上限，单位�
 cliff_approach_speed = 0.0        # 下台阶落地前的接近速度上限，单位为米/秒，填 0 时不启用
 terrain = "plane"                 # plane 为平地，mixed 为混合地形，scut_v1 为跑场，scut_ground 为贴地跑场
 terrain_traversal = false         # 是否在障碍地形上沿赛道持续行驶
+transition_stop_feedback = false # Wait for a measured stop or timeout before restarting.
+transition_speed_levels = []    # Optional approach speeds for transition lanes only (m/s).
 terrain_forward_limit = 0.0       # 非平地巡航指令的速度上限，单位为米/秒，填 0 时不额外限制
 scut_ground_scale = 1.0           # scut_ground 地形的垂直缩放比例，坡度和障碍高度一同缩放
 scut_ground_bars_fraction = 0.10  # scut_ground 中交叉凸条的回合占比，平地仍占 40%
 scut_ground_bars_reverse_probability = 0.50 # scut_ground 凸条回合中倒车通过的概率
 scut_ground_compound_fraction = 0.0 # 粗糙坡道和错位凸条的总占比，平地仍占 40%
 scut_ground_single_side_fraction = 0.0 # 左右单侧凸条的总占比
+scut_ground_speed_bump_fraction = 0.0 # 曲面减速带的回合占比
+scut_ground_speed_bump_height = [0.02, 0.04] # 减速带的三档高度范围，单位为米
+scut_ground_speed_bump_length = 0.30 # 减速带沿行进方向的长度，单位为米
 scut_ground_bars_variant_weights = [] # 普通交叉凸条的三档采样权重
 scut_ground_bars_speed_levels = [] # 普通交叉凸条按回合抽取的巡航速度档位，单位为米/秒
 scut_ground_rough_slope_variant_weights = [] # 粗糙坡道的三档采样权重
@@ -211,6 +222,11 @@ enabled = false             # 零转向指令时锁定当前航向
 gain = 2.5                  # 航向角误差转换为转向角速度的比例系数，单位为 1/s
 deadband_deg = 0.5           # 航向锁定允许的误差角度
 max_yaw_rate = 0.40          # 航向修正角速度上限，单位为 rad/s
+
+[task.locomotion.low_recovery]
+flat_episode_fraction = 0.0 # 平地回合中从低位落地并恢复的比例
+unpowered_seconds = 0.20    # 关闭主动腿轮驱动的落地时间
+deadline_seconds = 1.50     # 从复位到站稳的时间上限
 
 # PPO 每轮的采样和保存设置。
 [ppo]

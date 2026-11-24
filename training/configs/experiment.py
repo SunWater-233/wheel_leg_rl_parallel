@@ -66,6 +66,8 @@ def _validate_scut_reward(reward):
     braking = reward["braking"]
     if braking["enabled"] and braking["start_speed"] <= braking["zero_speed"]:
         raise ValueError("Braking start_speed must exceed zero_speed")
+    if braking["preserve_across_airborne"] and not braking["enabled"]:
+        raise ValueError("Preserving braking state requires enabled braking cost")
 
 
 def _validate_settings(settings):
@@ -82,8 +84,13 @@ def _validate_settings(settings):
             raise ValueError(f"task.observation_noise.{name} must be finite and nonnegative")
 
     locomotion = task["locomotion"]
+    if task["scut_rough_reward"]["tracking"]["use_projected_leg_height"]:
+        if not locomotion["enabled"] or locomotion["terrain"] != "plane":
+            raise ValueError("Projected leg height tracking requires plane locomotion")
     if locomotion["critic_terrain_observations"] and not locomotion["enabled"]:
         raise ValueError("Terrain observations for the critic require enabled locomotion")
+    if locomotion["actor_true_forward_speed"] and not locomotion["enabled"]:
+        raise ValueError("True forward speed for the actor requires enabled locomotion")
     heading_hold = locomotion["heading_hold"]
     if heading_hold["enabled"] and not locomotion["enabled"]:
         raise ValueError("Heading hold requires enabled locomotion")
@@ -92,14 +99,28 @@ def _validate_settings(settings):
             raise ValueError(f"task.locomotion.heading_hold.{name} must be finite and positive")
     if not 0.0 <= heading_hold["deadband_deg"] < 180.0:
         raise ValueError("task.locomotion.heading_hold.deadband_deg must be in [0, 180)")
+    recovery = locomotion["low_recovery"]
+    if not 0.0 <= recovery["flat_episode_fraction"] <= 1.0:
+        raise ValueError("low_recovery.flat_episode_fraction must be in [0, 1]")
+    unpowered = recovery["unpowered_seconds"]
+    deadline = recovery["deadline_seconds"]
+    if recovery["flat_episode_fraction"]:
+        if not locomotion["enabled"]:
+            raise ValueError("Low recovery requires enabled locomotion")
+        if not 0.0 < unpowered < deadline <= task["episode_seconds"]:
+            raise ValueError("Low recovery needs 0 < unpowered_seconds < deadline_seconds <= episode_seconds")
     if task["scut_rough_reward"]["braking"]["enabled"] and not locomotion["enabled"]:
         raise ValueError("The braking reward requires enabled locomotion")
     tracking = task["scut_rough_reward"]["tracking"]
     if (tracking["flat_roll_error_weight"] or tracking["flat_roll_rate_weight"]) and not locomotion["enabled"]:
         raise ValueError("The flat-specific roll reward requires enabled locomotion")
-    leg_torque_limit = locomotion["leg_torque_limit"]
-    if not isfinite(leg_torque_limit) or leg_torque_limit <= 0:
-        raise ValueError("task.locomotion.leg_torque_limit must be finite and positive")
+    for name in ("leg_torque_limit", "wheel_torque_limit"):
+        limit = locomotion[name]
+        if not isfinite(limit) or limit <= 0:
+            raise ValueError(f"task.locomotion.{name} must be finite and positive")
+    wheel_delay = locomotion["wheel_target_delay_steps"]
+    if type(wheel_delay) is not int or not 0 <= wheel_delay < 10:
+        raise ValueError("wheel_target_delay_steps must be an integer from 0 to 9")
     for name in ("height_range", "command_seconds", "slope_degrees", "obstacle_height"):
         _validate_range(locomotion, name)
     low, high = locomotion["height_range"]
@@ -130,6 +151,13 @@ def _validate_settings(settings):
         raise ValueError("launch_maneuvers requires enabled locomotion and speed_maneuvers")
     if locomotion["height_maneuvers"] and not (locomotion["enabled"] and locomotion["speed_maneuvers"]):
         raise ValueError("height_maneuvers requires enabled locomotion and speed_maneuvers")
+    height_sequence = locomotion["height_maneuver_sequence"]
+    if height_sequence and (
+        not locomotion["height_maneuvers"] or len(height_sequence) < 2
+        or any(type(height) not in (int, float) or not low <= height <= high for height in height_sequence)
+        or any(a == b for a, b in zip(height_sequence, height_sequence[1:] + height_sequence[:1]))
+    ):
+        raise ValueError("height_maneuver_sequence requires height maneuvers and distinct consecutive heights in height_range")
     if not 0 <= locomotion["stationary_episode_fraction"] <= 1:
         raise ValueError("stationary_episode_fraction must be in [0, 1]")
     for name in ("launch_press_seconds", "launch_stop_seconds"):
@@ -139,6 +167,7 @@ def _validate_settings(settings):
         )):
             raise ValueError(f"{name} requires launch_maneuvers and positive durations shorter than an episode")
     for name, maximum in (("command_speed_levels", MAX_FORWARD_SPEED),
+                          ("transition_speed_levels", MAX_FORWARD_SPEED),
                           ("scut_ground_bars_speed_levels", MAX_FORWARD_SPEED),
                           ("command_acceleration_levels", MAX_FORWARD_ACCELERATION)):
         if any(type(value) not in (int, float) or not 0 < value <= maximum for value in locomotion[name]):
@@ -157,16 +186,27 @@ def _validate_settings(settings):
         ) or not any(weights)):
             raise ValueError(f"{name} requires {length} nonnegative weights with a positive sum")
     terrain = locomotion["terrain"]
-    if terrain not in ("plane", "mixed", "scut_v1", "scut_ground"):
-        raise ValueError("terrain must be plane, mixed, scut_v1 or scut_ground")
+    if locomotion["transition_stop_feedback"] and terrain != "transitions":
+        raise ValueError("transition_stop_feedback requires transitions terrain")
+    transition_speeds = locomotion["transition_speed_levels"]
+    if transition_speeds and terrain != "transitions":
+        raise ValueError("transition_speed_levels requires transitions terrain")
+    if terrain not in ("plane", "mixed", "scut_v1", "scut_ground", "transitions"):
+        raise ValueError("terrain must be plane, mixed, scut_v1, scut_ground or transitions")
     has_terrain = terrain != "plane"
     if locomotion["terrain_traversal"] and not (locomotion["enabled"] and has_terrain):
         raise ValueError("terrain_traversal requires enabled terrain locomotion")
     terrain_limit = locomotion["terrain_forward_limit"]
     if not 0 <= terrain_limit <= MAX_FORWARD_SPEED or (terrain_limit and not locomotion["terrain_traversal"]):
         raise ValueError("terrain_forward_limit requires terrain_traversal and a speed within the chassis range")
-    if terrain in ("scut_v1", "scut_ground") and not locomotion["terrain_traversal"]:
+    if terrain in ("scut_v1", "scut_ground", "transitions") and not locomotion["terrain_traversal"]:
         raise ValueError(f"{terrain} requires terrain_traversal")
+    if terrain == "transitions":
+        speeds = locomotion["command_speed_levels"]
+        low, high = task["forward_command"]
+        if (not speeds or speeds != sorted(set(speeds)) or max(speeds + transition_speeds) > min(-low, high)
+                or terrain_limit):
+            raise ValueError("transitions requires increasing speed levels within both command directions and no terrain cap")
     scale = locomotion["scut_ground_scale"]
     if not 0.50 <= scale <= 1.0 or (scale != 1.0 and terrain != "scut_ground"):
         raise ValueError("scut_ground_scale must be in [0.50, 1.0] and is only adjustable on scut_ground")
@@ -174,17 +214,22 @@ def _validate_settings(settings):
     bars_reverse = locomotion["scut_ground_bars_reverse_probability"]
     compound_fraction = locomotion["scut_ground_compound_fraction"]
     single_side_fraction = locomotion["scut_ground_single_side_fraction"]
+    bump_fraction = locomotion["scut_ground_speed_bump_fraction"]
     low_rough_slope = locomotion["scut_ground_rough_slope_low_height_probability"]
-    obstacle_fractions = (bars_fraction, compound_fraction, single_side_fraction)
+    obstacle_fractions = (bars_fraction, compound_fraction, single_side_fraction, bump_fraction)
     if (any(not 0.0 <= fraction <= 0.60 for fraction in obstacle_fractions)
             or sum(obstacle_fractions) > 0.60):
-        raise ValueError("scut_ground bars, compound and single-side fractions must sum to at most 0.60")
+        raise ValueError("scut_ground obstacle sampling fractions must sum to at most 0.60")
+    bump_low, bump_high = _validate_range(locomotion, "scut_ground_speed_bump_height")
+    if not 0 < bump_low <= bump_high <= 0.15 or not 0.20 <= locomotion["scut_ground_speed_bump_length"] <= 1.0:
+        raise ValueError("Speed bump height must be in (0, 0.15] m and length in [0.20, 1.0] m")
     if not (0.0 <= bars_reverse <= 1.0 and 0.0 <= low_rough_slope <= 1.0):
         raise ValueError("scut_ground reverse and low-height probabilities must be in [0, 1]")
     rough_slope_focus = low_rough_slope or locomotion["scut_ground_rough_slope_variant_weights"]
     if rough_slope_focus and not compound_fraction:
         raise ValueError("Rough-slope sampling requires a positive scut_ground_compound_fraction")
     has_scut_sampling = (bars_fraction != 0.10 or bars_reverse != 0.50 or compound_fraction or single_side_fraction
+                         or bump_fraction
                          or rough_slope_focus or locomotion["scut_ground_bars_variant_weights"]
                          or locomotion["scut_ground_bars_speed_levels"])
     if has_scut_sampling and terrain != "scut_ground":
@@ -271,11 +316,13 @@ def load_config(path=None):
         return _merge_config(tomllib.load(file))
 
 
-def runner_config(ppo):
+def runner_config(ppo, *, actor_true_forward_speed=False):
     # RSL-RL removes class names and alters the configuration it receives.
     config = deepcopy(ppo)
     config.pop("max_action_std", None)
     config["obs_groups"] = {"policy": ["policy"], "critic": ["critic"]}
+    if actor_true_forward_speed:
+        config["obs_groups"]["policy"].append("body_forward_speed")
     config["policy"]["class_name"] = "ActorCritic"
     config["algorithm"]["class_name"] = "PPO"
     return config

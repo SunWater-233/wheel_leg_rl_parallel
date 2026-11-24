@@ -1,6 +1,7 @@
 """V0.2 locomotion with continuous hip-to-wheel height commands."""
 
-from math import radians
+from itertools import product
+from math import ceil, cos, radians, tau
 
 import genesis as gs
 import torch
@@ -8,7 +9,7 @@ from genesis.utils.geom import inv_transform_by_quat
 from tensordict import TensorDict
 
 from configs.experiment import MAX_FORWARD_ACCELERATION, MAX_FORWARD_SPEED, YAW_REFERENCE
-from envs.terrain import SCUT_GROUND_SINGLE_SIDE_SURFACES, TERRAIN_LANES, ScutGroundLanes, ScutV1Lanes
+from envs.terrain import SCUT_GROUND_SINGLE_SIDE_SURFACES, TERRAIN_LANES, ScutGroundLanes, ScutV1Lanes, TransitionLanes
 from robots.domain_randomization import randomize_dynamics
 from robots.scut_rough_reward import ScutRoughReward
 from robots.wheel_leg import HOME_JOINTS, WheelLegFlatEnv
@@ -26,8 +27,18 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
     critic_scan_distances = (-0.30, -0.18, -0.09, 0.0, 0.09, 0.18, 0.30)
     critic_terrain_dims = 2 * (1 + len(critic_scan_distances))
 
+    def __init__(self, *args, preview_lane=None, **kwargs):
+        self.preview_lane = preview_lane
+        super().__init__(*args, **kwargs)
+
     def _robot_morph(self, model_path, viewer):
-        self.pose_table = solve_stances(model_path, self.cfg["locomotion"]["height_range"], self.wheel_radius)
+        settings = self.cfg["locomotion"]
+        height_limits = settings["height_range"]
+        self.pose_table = solve_stances(model_path, height_limits, self.wheel_radius)
+        self.recovery_fraction = settings["low_recovery"]["flat_episode_fraction"]
+        if self.recovery_fraction:
+            offsets = tuple(product((-0.11, -0.075, 0.075, 0.11), repeat=2))
+            self.recovery_poses = solve_stances(model_path, height_limits, self.wheel_radius, wheel_offsets=offsets)
         return super()._robot_morph(model_path, viewer)
 
     def _add_ground(self, material, viewer):
@@ -38,9 +49,13 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         if settings["terrain"] == "plane":
             super()._add_ground(material, viewer)
             return
-        self.lanes = TERRAIN_LANES[settings["terrain"]](settings)
-        surface = self.lanes.visual_surface() if viewer else None
-        self.ground = self.scene.add_entity(self.lanes.morph(viewer), material=material, surface=surface)
+        self.lanes = self._make_lanes(settings)
+        lane = None
+        if self.preview_lane is not None:
+            name, variant = self.preview_lane
+            lane = self.lanes.surfaces.index(name) * self.lanes.variants + variant
+        surface = self.lanes.visual_surface(lane) if viewer else None
+        self.ground = self.scene.add_entity(self.lanes.morph(viewer, lane), material=material, surface=surface)
         self.terrain_contacts.append(self.ground)
         if isinstance(self.lanes, ScutV1Lanes):
             deck_surface = gs.surfaces.Default(color=(0.73, 0.47, 0.27), roughness=0.95) if viewer else None
@@ -49,6 +64,9 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                                     fixed=True, visualization=viewer)
                 self.terrain_contacts.append(self.scene.add_entity(box, material=material, surface=deck_surface))
 
+    def _make_lanes(self, settings):
+        return TERRAIN_LANES[settings["terrain"]](settings)
+
     def terrain_description(self):
         if self.lanes is None:
             return super().terrain_description()
@@ -56,7 +74,10 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         return self.lanes.describe(surface, variant)
 
     def _set_drives(self):
-        self.leg_torque_limit = self.cfg["locomotion"]["leg_torque_limit"]
+        settings = self.cfg["locomotion"]
+        self.leg_torque_limit = settings["leg_torque_limit"]
+        self.wheel_torque_limit = settings["wheel_torque_limit"]
+        self.wheel_target_delay_steps = settings["wheel_target_delay_steps"]
         super()._set_drives()
 
     def _initialize_task(self):
@@ -72,6 +93,20 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.height_curriculum_rollout = 0
         self._set_height_curriculum_iteration(0)
         self.pose_table = self.home_qpos.new_tensor(self.pose_table)
+        if self.recovery_fraction:
+            self.recovery_poses = self.home_qpos.new_tensor(self.recovery_poses)
+            recovery = settings["low_recovery"]
+            self.recovery_unpowered_steps = ceil(recovery["unpowered_seconds"] / self.control_dt)
+            self.recovery_deadline_steps = ceil(recovery["deadline_seconds"] / self.control_dt)
+            self.recovery_hold_steps = ceil(0.24 / self.control_dt)
+            if self.recovery_deadline_steps < self.recovery_unpowered_steps + self.recovery_hold_steps:
+                raise ValueError("Low recovery deadline must leave at least 0.24 s after touchdown")
+            self.recovery_steps = torch.full_like(self.episode_length_buf, -1)
+            self.recovery_stable_steps = torch.zeros_like(self.recovery_steps)
+            self.recovery_succeeded = torch.zeros_like(self.recovery_steps, dtype=torch.bool)
+            self.recovery_failed = torch.zeros_like(self.recovery_succeeded)
+            self.recovery_counts = self.recovery_steps.new_zeros(2)
+            self.recovery_zero_force = self.home_qpos.new_zeros((self.num_envs, self.num_actions))
         self.body_height_offset = self.pose_table[0, 0].item() - self.height_low - STANCE_SPAWN_GAP
         base = self.robot.get_joint("base_link").qs_idx_local
         self.base_xy = base[:2]
@@ -107,6 +142,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                 ])
         self.cliff_approach_speed = settings["cliff_approach_speed"]
         self.observation_noise = None
+        self.actor_true_forward_speed = settings["actor_true_forward_speed"]
         self.critic_scan_offsets = None
         if settings["critic_terrain_observations"]:
             self.critic_scan_offsets = self.commands.new_tensor(self.critic_scan_distances)
@@ -122,6 +158,9 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.braking_maneuvers = settings["braking_maneuvers"]
         self.launch_maneuvers = settings["launch_maneuvers"]
         self.height_maneuvers = settings["height_maneuvers"]
+        self.height_maneuver_sequence = self.commands.new_tensor(settings["height_maneuver_sequence"])
+        if self.height_maneuver_sequence.numel():
+            self.height_sequence_index = torch.zeros_like(self.episode_length_buf)
         self.launch_press_seconds = self.commands.new_tensor(settings["launch_press_seconds"])
         self.launch_stop_seconds = self.commands.new_tensor(settings["launch_stop_seconds"])
         self.maneuver_weights = self.commands.new_tensor(settings["speed_maneuver_weights"])
@@ -142,6 +181,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.pitch_peaks = torch.zeros_like(self.pitch_deg)
         self.episode_steps = torch.zeros_like(self.episode_length_buf)
         self.height_errors = torch.zeros_like(self.command_time)
+        self.leg_height_errors = torch.zeros_like(self.height_errors)
         self.velocity_errors = torch.zeros_like(self.command_time)
         self.yaw_errors = torch.zeros_like(self.command_time)
         self.leg_saturated_steps = torch.zeros_like(self.episode_steps)
@@ -153,16 +193,31 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         if self.terrain_traversal:
             self.traversal_reverse = torch.zeros_like(self.surface, dtype=torch.bool)
             self.traversal_distance = torch.zeros_like(self.command_time)
-        self.auto_commands = True
+        self.auto_commands = self.preview_lane is None
+        self.free_drive = False
         self.demo_surface = None
         self.demo_initial_height = self.height_nominal
         self.demo_reverse = False
         self.demo_variant = 0
+        if self.preview_lane is not None:
+            name, self.demo_variant = self.preview_lane
+            self.demo_surface = self.lanes.surfaces.index(name)
         self.forward_drop = bool(settings["cliff_drop_heights"])
         self.surface_variant_weights = None
         self.single_side_surfaces = None
         self.low_rough_slope = None
         self.bar_speed = None
+        self.transition_course = isinstance(self.lanes, TransitionLanes)
+        self.transition_stop_feedback = settings["transition_stop_feedback"]
+        if self.transition_course:
+            self.transition_speed_levels = self.commands.new_tensor(settings["transition_speed_levels"])
+            self.transition_reverse_spawn_z = self.commands.new_tensor(self.lanes.reverse_spawn_z)
+            self.transition_forward_only = self.surface.new_tensor(self.lanes.forward_only, dtype=torch.bool)
+            self.transition_stop_at = torch.zeros_like(self.command_time)
+            self.transition_stop_phase = torch.zeros_like(self.surface)
+            self.transition_still_time = torch.zeros_like(self.command_time)
+            self.transition_stop_elapsed = torch.zeros_like(self.command_time)
+            self.transition_peak_command = torch.zeros_like(self.command_time)
         if self.lanes is not None:
             self.lane_centers = self.commands.new_tensor(self.lanes.centers)
             self.surface_weights = self.commands.new_tensor(self.lanes.surface_weights)
@@ -272,6 +327,13 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                 airborne = cliff & (~self.drop_touched[ids] | (self.landing_elapsed[ids] < self.landing_seconds))
                 approach = self.cliff_approach_speed * (0.80 + 0.20 * sample[:, 0])
                 cruise = torch.where(airborne, torch.minimum(cruise, approach), cruise)
+            if self.transition_course:
+                direction = torch.where(self.traversal_reverse[ids], -1.0, 1.0)
+                cruise = self.episode_speed_limit[ids] * direction
+                phase = self.transition_stop_phase[ids]
+                restart = torch.where(cruise.abs() > 0.3, 0.45 * cruise, 0.30 * direction)
+                cruise = torch.where(phase == 3, restart, cruise)
+                cruise = cruise.masked_fill((phase == 2) | (phase == 4), 0.0)
             motion[:, 0] = torch.where(traverse, cruise, motion[:, 0])
             motion[:, 1] = torch.where(traverse, 0.0, motion[:, 1])
         if self.stationary_episode_fraction:
@@ -356,11 +418,18 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             flat = self.surface[ids] == 0
             height_only = (self.maneuver[ids] == self.height_mode) & flat
             previous = self.goals[ids, 2]
-            midpoint = (self.height_high + self.height_low) / 2
-            opposite = torch.where(previous < midpoint, self.height_high, self.height_low)
-            height = torch.where(height_only, opposite, height)
+            initial_height = self.episode_steps[ids] == 0
+            if self.height_maneuver_sequence.numel():
+                index = self.height_sequence_index[ids]
+                index = (index + (height_only & ~initial_height)).remainder(self.height_maneuver_sequence.numel())
+                self.height_sequence_index[ids] = index
+                height = torch.where(height_only, self.height_maneuver_sequence[index], height)
+            else:
+                midpoint = (self.height_high + self.height_low) / 2
+                opposite = torch.where(previous < midpoint, self.height_high, self.height_low)
+                height = torch.where(height_only, opposite, height)
             # Start with a fixed height so the cruise cases can reach their speed first.
-            hold = flat & (~height_only | (self.episode_steps[ids] == 0))
+            hold = flat & (~height_only | initial_height)
             height = torch.where(hold, previous, height)
         elif self.launch_maneuvers:
             launch = (self.maneuver[ids] == self.launch_mode) & (self.surface[ids] == 0)
@@ -384,6 +453,9 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         qpos = self.home_qpos[ids].clone()
         ground_height = 0.0
         scut_course = isinstance(self.lanes, ScutV1Lanes)
+        if self.transition_course and self.speed_levels.numel() and self.auto_commands:
+            levels = torch.randint(self.speed_levels.numel(), (ids.numel(),), device=self.device)
+            self.episode_speed_limit[ids] = self.speed_levels[levels]
         if self.lanes is not None:
             if self.demo_surface is None:
                 self.surface[ids] = torch.multinomial(self.surface_weights, ids.numel(), replacement=True)
@@ -399,6 +471,10 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                 variant = self.demo_variant
                 jitter = 0.0
             self.terrain_variant[ids] = variant
+            if self.transition_course and self.auto_commands and self.transition_speed_levels.numel():
+                levels = torch.randint(self.transition_speed_levels.numel(), (ids.numel(),), device=self.device)
+                self.episode_speed_limit[ids] = torch.where(self.surface[ids] != 0, self.transition_speed_levels[levels],
+                                                            self.episode_speed_limit[ids])
             lane = self.surface[ids] * self.lanes.variants + variant
             self.spawn_y[ids] = self.lane_centers[lane]
             qpos[:, self.base_xy[0]] = 0.0
@@ -412,6 +488,11 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                     reverse = torch.full((ids.numel(),), self.demo_reverse, device=self.device, dtype=torch.bool)
                 self.traversal_reverse[ids] = reverse
                 ground_height = self.lane_spawn_z[lane]
+                if self.transition_course:
+                    if self.auto_commands:
+                        reverse = reverse & ~self.transition_forward_only[lane]
+                    self.traversal_reverse[ids] = reverse
+                    ground_height = torch.where(reverse, self.transition_reverse_spawn_z[lane], ground_height)
                 positive_x = reverse
                 if self.forward_drop:
                     cliff = self.surface[ids] == self.cliff_surface
@@ -424,15 +505,30 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                     self.deck_height[ids] = torch.where(cliff, ground_height, 0.0)
                     self.drop_touched[ids] = False
                     self.landing_elapsed[ids] = self.landing_seconds
-                self.spawn_x[ids] = torch.where(positive_x, self.lane_spawn_x[lane], -self.lane_spawn_x[lane])
+                approach = self.lane_spawn_x[lane]
+                if self.transition_course and self.auto_commands:
+                    long_runup = (self.surface[ids] != 0) & (self.episode_speed_limit[ids] >= 1.6)
+                    approach = torch.where(long_runup, 9.0, approach)
+                if self.free_drive and self.demo_surface == 0 and isinstance(self.lanes, ScutGroundLanes):
+                    # Start on the clear apron shared by the obstacle lanes.
+                    approach = torch.full_like(approach, self.lanes.approach_x)
+                self.spawn_x[ids] = torch.where(positive_x, approach, -approach)
                 qpos[:, self.base_xy[0]] = self.spawn_x[ids]
             if self.low_rough_slope is not None and self.auto_commands:
                 focus = ((self.surface[ids] == self.rough_slope_surface)
                          & (torch.rand(ids.numel(), device=self.device) < self.low_rough_slope_probability))
                 self.low_rough_slope[ids] = focus
                 height = torch.where(focus, height.clamp_max(self.height_nominal), height)
-        qpos[:, self.pose_indices] = self._poses(height)
+        if self.auto_commands and self.height_maneuver_sequence.numel():
+            self._sample_maneuvers(ids)
+            self.height_sequence_index[ids] = 0
+            height_episode = (self.maneuver[ids] == self.height_mode) & (self.surface[ids] == 0)
+            height = torch.where(height_episode, self.height_maneuver_sequence[0], height)
+        stance = self._poses(height)
+        qpos[:, self.pose_indices] = stance
         qpos[:, self.pose_indices[0]] += ground_height
+        if self.recovery_fraction:
+            self._sample_recovery_starts(ids, qpos, stance[:, 0])
         self.robot.set_qpos(qpos, envs_idx=ids, zero_velocity=True)
         if self.heading_hold_enabled:
             self.heading_target[ids] = self._yaw_from_quat(qpos[:, self.base_quat])
@@ -442,6 +538,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.episode_length_buf[ids] = 0
         self.episode_steps[ids] = 0
         self.height_errors[ids] = 0.0
+        self.leg_height_errors[ids] = 0.0
         self.velocity_errors[ids] = 0.0
         self.yaw_errors[ids] = 0.0
         self.posture_sums[ids] = 0.0
@@ -460,9 +557,20 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.commands[ids, 2] = height
         self.measured_heights[ids] = height[:, None]
         self.goals[ids] = self.commands[ids]
-        if self.speed_levels.numel() and self.auto_commands:
+        if not self.transition_course and self.speed_levels.numel() and self.auto_commands:
             levels = torch.randint(self.speed_levels.numel(), (ids.numel(),), device=self.device)
             self.episode_speed_limit[ids] = self.speed_levels[levels]
+        if self.transition_course:
+            # Brake after reaching the first or second join; some episodes hold cruise throughout.
+            sample = torch.rand((ids.numel(), 3), device=self.device)
+            self.transition_stop_at[ids] = torch.where(sample[:, 0] < 0.70, -2.50, 0.35) + 0.2 * sample[:, 1]
+            if self.transition_stop_feedback:
+                self.transition_stop_at[ids] = torch.where(sample[:, 0] < 0.70, -2.8, 0.0) + 0.5 * sample[:, 1] - 0.15
+            braking = (self.surface[ids] != 0) & (sample[:, 2] < 0.40) & self.auto_commands
+            self.transition_stop_phase[ids] = braking.long()
+            self.transition_still_time[ids] = 0.0
+            self.transition_stop_elapsed[ids] = 0.0
+            self.transition_peak_command[ids] = 0.0
         if not self.auto_commands:
             self.motion_step[ids, 0] = self.manual_forward_acceleration * self.control_dt
         elif self.acceleration_levels.numel():
@@ -478,25 +586,46 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             if self.stationary_episode_fraction:
                 stationary = torch.rand(ids.numel(), device=self.device) < self.stationary_episode_fraction
                 self.stationary_episode[ids] = stationary & (self.surface[ids] == 0)
-            if self.speed_maneuvers:
-                count = 5 if self.braking_maneuvers else 4
-                if self.maneuver_weights.numel():
-                    self.maneuver[ids] = torch.multinomial(self.maneuver_weights, ids.numel(), replacement=True)
-                else:
-                    self.maneuver[ids] = torch.randint(count, (ids.numel(),), device=self.device)
-                    if self.launch_maneuvers:
-                        launch = (torch.rand(ids.numel(), device=self.device) < 0.30) & (self.surface[ids] == 0)
-                        self.maneuver[ids] = self.maneuver[ids].masked_fill(launch, self.launch_mode)
-                    if self.height_maneuvers:
-                        height_only = (torch.rand(ids.numel(), device=self.device) < 0.25) & (self.surface[ids] == 0)
-                        self.maneuver[ids] = self.maneuver[ids].masked_fill(height_only, self.height_mode)
-                self.maneuver_phase[ids] = 0
-                self.maneuver_reverse[ids] = torch.rand((ids.numel(), 2), device=self.device) < 0.5
+            if self.speed_maneuvers and not self.height_maneuver_sequence.numel():
+                self._sample_maneuvers(ids)
             self._sample_motion_goals(ids)
             self._sample_height_goals(ids)
 
-    def begin_demo(self, height, surface, reverse=False, variant=0):
+    def _sample_maneuvers(self, ids):
+        count = 5 if self.braking_maneuvers else 4
+        if self.maneuver_weights.numel():
+            self.maneuver[ids] = torch.multinomial(self.maneuver_weights, ids.numel(), replacement=True)
+        else:
+            self.maneuver[ids] = torch.randint(count, (ids.numel(),), device=self.device)
+            if self.launch_maneuvers:
+                launch = (torch.rand(ids.numel(), device=self.device) < 0.30) & (self.surface[ids] == 0)
+                self.maneuver[ids] = self.maneuver[ids].masked_fill(launch, self.launch_mode)
+            if self.height_maneuvers:
+                height_only = (torch.rand(ids.numel(), device=self.device) < 0.25) & (self.surface[ids] == 0)
+                self.maneuver[ids] = self.maneuver[ids].masked_fill(height_only, self.height_mode)
+        self.maneuver_phase[ids] = 0
+        self.maneuver_reverse[ids] = torch.rand((ids.numel(), 2), device=self.device) < 0.5
+
+    def _sample_recovery_starts(self, ids, qpos, stance_height):
+        self.recovery_steps[ids] = -1
+        self.recovery_stable_steps[ids] = 0
+        self.recovery_succeeded[ids] = False
+        self.recovery_failed[ids] = False
+        if not self.auto_commands:
+            return
+        selected = (self.surface[ids] == 0) & (torch.rand(ids.numel(), device=self.device) < self.recovery_fraction)
+        reset_rows = selected.nonzero(as_tuple=True)[0]
+        choices = torch.randint(len(self.recovery_poses), (reset_rows.numel(),), device=self.device)
+        poses = self.recovery_poses[choices]
+        # Reuse the lane position and terrain elevation. The wheels begin clear of the flat surface.
+        height = self.pose_indices[0]
+        qpos[reset_rows, height] += poses[:, 0] + 0.07 - stance_height[reset_rows]
+        qpos[reset_rows[:, None], self.pose_indices[1:]] = poses[:, 1:]
+        self.recovery_steps[ids[reset_rows]] = 0
+
+    def begin_demo(self, height, surface, reverse=False, variant=0, *, free_drive=False):
         self.auto_commands = False
+        self.free_drive = free_drive
         self.demo_initial_height = height
         self.demo_surface = self.lanes.surfaces.index(surface) if self.lanes is not None else None
         self.demo_reverse = reverse
@@ -514,6 +643,8 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             targets[:, 1] = self._heading_yaw_target(targets[:, 1]).clamp(
                 min=self.command_lower[1], max=self.command_upper[1]
             )
+        if self.recovery_fraction:
+            targets[:, :2].masked_fill_(self.recovery_steps[:, None] >= 0, 0.0)
         vx, yaw = targets[:, :2].unbind(1)
         demand = torch.sqrt((vx / MAX_FORWARD_SPEED).square() + (yaw / YAW_REFERENCE).square())
         # The chassis reduces combined demand as turning unloads the inside wheel.
@@ -596,7 +727,9 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         lin_vel, ang_vel, gravity, _ = super()._base_state()
         heights = self.leg_heights(gravity)
         nominal = self._poses(self.commands[:, 2])[:, self.leg_columns]
-        joint_pos = (self.robot.get_dofs_position(self.leg_dofs) - nominal) * self.leg_direction
+        joint_error = self.robot.get_dofs_position(self.leg_dofs) - nominal
+        # The driven leg hinges can accumulate whole turns during recovery.
+        joint_pos = (joint_error - tau * torch.round(joint_error / tau)) * self.leg_direction
         joint_vel = self.robot.get_dofs_velocity(self.action_dofs) * self.action_direction
         policy = torch.cat((self.commands * self.motion_scales, self.height_rate[:, None], ang_vel, gravity,
                             joint_pos, joint_vel * 0.1, self.last_actions, heights * 5.0), dim=1)
@@ -608,7 +741,10 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             # The critic retains the original state; commands, history and inferred leg height stay intact.
             sensors = policy[:, 4:20]
             sensors.add_(torch.randn_like(sensors) * self.observation_noise)
-        return TensorDict({"policy": policy, "critic": critic}, batch_size=[self.num_envs])
+        observations = {"policy": policy, "critic": critic}
+        if self.actor_true_forward_speed:
+            observations["body_forward_speed"] = lin_vel[:, :1].contiguous()
+        return TensorDict(observations, batch_size=[self.num_envs])
 
     def _critic_terrain_observations(self):
         # Scan both travel directions along each wheel track in the horizontal plane.
@@ -626,8 +762,29 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         nominal = self._poses(self.commands[:, 2])[:, self.leg_columns]
         offsets = (actions[:, :4] * self.leg_action_scale).clamp(-0.35, 0.35)
         targets = nominal + offsets * self.leg_direction + self.leg_bias
+        # The position servo needs the equivalent target nearest the current joint angle.
+        current = self.robot.get_dofs_position(self.leg_dofs)
+        targets += tau * torch.round((current - targets) / tau)
         self.robot.control_dofs_position(targets, self.leg_dofs)
         self.robot.control_dofs_position(self.gimbal_target, self.gimbal_dofs)
+
+    def _apply_controls(self, actions):
+        super()._apply_controls(actions)
+        if not self.recovery_fraction:
+            return actions
+        unpowered = (self.recovery_steps >= 0) & (self.recovery_steps < self.recovery_unpowered_steps)
+        ids = unpowered.nonzero(as_tuple=True)[0]
+        if ids.numel():
+            self.robot.control_dofs_force(self.recovery_zero_force[ids], self.action_dofs, envs_idx=ids)
+        return actions.masked_fill(unpowered[:, None], 0.0)
+
+    def _episode_timeout(self):
+        if self.free_drive:
+            return torch.zeros_like(self.episode_length_buf, dtype=torch.bool)
+        timed_out = super()._episode_timeout()
+        if self.recovery_fraction:
+            timed_out &= self.recovery_steps < 0
+        return timed_out
 
     def ground_height_at(self, pos):
         if self.ground is None:
@@ -639,6 +796,18 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                        & ((points[..., 1] - self.spawn_y[:, None]).abs() <= self.lanes.deck_half_width))
             surface_z = surface_z + self.deck_height[:, None] * on_deck
         return surface_z.reshape(pos.shape[:-1])
+
+    def _terrain_out_of_bounds(self, pos, surface_z):
+        x, y = pos[:, 0], pos[:, 1]
+        if self.free_drive:
+            margin = 0.30
+            outside = (x.abs() >= self.lanes.half_length - margin) | (y <= margin) | (y >= self.lanes.width - margin)
+        else:
+            travel_limit = self.lanes.travel_limit
+            if isinstance(self.lanes, ScutGroundLanes):
+                travel_limit = torch.where(self.surface == 0, self.lanes.flat_travel_limit, travel_limit)
+            outside = (x.abs() >= travel_limit) | ((y - self.spawn_y).abs() >= self.lanes.lateral_limit)
+        return outside | ~torch.isfinite(surface_z)
 
     def _termination(self, height, gravity, contact):
         heights, fore_aft = self._leg_projections(gravity)
@@ -659,12 +828,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                 torch.maximum(self.traversal_distance, x.abs(), out=self.traversal_distance)
             surface_z = self.ground_height_at(pos)
             clearance = height - surface_z.nan_to_num()
-            travel_limit = self.lanes.travel_limit
-            if isinstance(self.lanes, ScutGroundLanes):
-                travel_limit = torch.where(self.surface == 0, self.lanes.flat_travel_limit, travel_limit)
-            out_of_bounds = ((pos[:, 0].abs() >= travel_limit)
-                             | ((pos[:, 1] - self.spawn_y).abs() >= self.lanes.lateral_limit)
-                             | ~torch.isfinite(surface_z))
+            out_of_bounds = self._terrain_out_of_bounds(pos, surface_z)
 
         if self.ground is not None:
             clearance_for_reward = self.scut_reward.measure_clearance(clearance)
@@ -673,10 +837,28 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.body_clearance.copy_(clearance_for_reward)
         height_target = self.commands[:, 2] + self.body_height_offset
         self.height_errors += (self.body_clearance - height_target).abs()
+        self.leg_height_errors += (heights.mean(dim=1) - self.commands[:, 2]).abs()
         if self.forward_drop:
             self._update_drop_landing(pos, contact)
         fallen = body_contact | (clearance < 0.045) | (gravity[:, 2] > -0.65)
+        if self.recovery_fraction:
+            fallen = self._check_recovery(fallen, out_of_bounds, gravity, contact, height_target)
         return fallen, out_of_bounds
+
+    def _check_recovery(self, fallen, out_of_bounds, gravity, contact, height_target):
+        recovering = self.recovery_steps >= 0
+        self.recovery_steps += recovering
+        wheels_loaded = (contact[:, self.wheel_links, 2] > 5.0).all(dim=1)
+        stable = (recovering & (self.recovery_steps > self.recovery_unpowered_steps) & ~fallen
+                  & (gravity[:, 2] < -cos(radians(10.0))) & wheels_loaded
+                  & ((self.body_clearance - height_target).abs() < 0.04)
+                  & (self.robot.get_ang().norm(dim=1) < 0.8))
+        self.recovery_stable_steps.copy_(torch.where(stable, self.recovery_stable_steps + 1, 0))
+        self.recovery_succeeded.copy_(self.recovery_stable_steps >= self.recovery_hold_steps)
+        self.recovery_failed.copy_(recovering & ~self.recovery_succeeded
+                                   & ((self.recovery_steps >= self.recovery_deadline_steps) | out_of_bounds))
+        self.recovery_steps.masked_fill_(self.recovery_succeeded | self.recovery_failed, -1)
+        return torch.where(recovering, self.recovery_failed, fallen)
 
     def _update_drop_landing(self, pos, contact):
         forces = contact[:, self.wheel_links, 2].clamp_min(0.0)
@@ -696,6 +878,8 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             if not remainder:
                 self._set_height_curriculum_iteration(iteration)
         self.episode_steps += 1
+        if self.transition_course:
+            torch.maximum(self.transition_peak_command, self.commands[:, 0].abs(), out=self.transition_peak_command)
         self.velocity_errors += (lin_vel[:, 0] - self.commands[:, 0]).abs()
         self.yaw_errors += (ang_vel[:, 2] - self.commands[:, 1]).abs()
         self.posture_sums += self.posture
@@ -717,6 +901,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             roll, fore_aft, height_gap = (self.posture_sums[finished] / count[:, None]).unbind(dim=1)
             extras["log"] = {
                 "body_height_mae_cm": 100.0 * self.height_errors[finished] / count,
+                "leg_height_mae_cm": 100.0 * self.leg_height_errors[finished] / count,
                 "forward_mae_m_s": self.velocity_errors[finished] / count,
                 "yaw_mae_rad_s": self.yaw_errors[finished] / count,
                 "fall_rate": extras["fallen"][finished].float(),
@@ -730,8 +915,40 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             }
             if self.terrain_traversal:
                 extras["log"]["terrain_progress_m"] = self.traversal_distance[finished]
+            if self.transition_course:
+                transitioned = finished[self.surface[finished] != 0]
+                if transitioned.numel():
+                    extras["log"]["Transition/peak_command_m_s"] = self.transition_peak_command[transitioned]
+                    extras["log"]["Transition/fall_rate"] = extras["fallen"][transitioned].float()
+        if self.recovery_fraction:
+            resolved = self.recovery_succeeded | self.recovery_failed
+            self.recovery_counts += torch.stack((resolved.sum(), self.recovery_succeeded.sum()))
+            extras["recovery_succeeded"] = self.recovery_succeeded.clone()
+            extras["recovery_failed"] = self.recovery_failed.clone()
         if self.auto_commands:
             self.command_time -= self.control_dt
+            if self.transition_course:
+                phase = self.transition_stop_phase
+                x = self.robot.get_pos()[:, 0]
+                along = torch.where(self.traversal_reverse, -x, x)
+                start = (phase == 1) & (along >= self.transition_stop_at)
+                stopping = phase == 2
+                if self.transition_stop_feedback:
+                    stable = (stopping & ~done & (self.commands[:, 0].abs() < 0.025)
+                              & (lin_vel[:, :2].norm(dim=1) <= 0.08) & extras["wheel_contacts"].all(dim=1)
+                              & (pitch <= 8.0) & (self.posture[:, 0] <= 8.0))
+                    self.transition_still_time.copy_(torch.where(stable, self.transition_still_time + self.control_dt, 0))
+                    self.transition_stop_elapsed += self.control_dt * stopping
+                    restart = stopping & (self.transition_still_time >= 0.24 - 1e-6)
+                    timeout = stopping & (self.transition_stop_elapsed >= 4.5) & ~restart
+                    # A failed stop stays at zero for the rest of the episode.
+                    phase.masked_fill_(timeout, 4)
+                else:
+                    self.transition_still_time += self.control_dt * (stopping & (self.commands[:, 0].abs() < 0.025))
+                    restart = stopping & (self.transition_still_time >= 0.9)
+                phase.masked_fill_(start, 2)
+                phase.masked_fill_(restart, 3)
+                self.command_time.masked_fill_(start | restart, 0.0)
             due_motion = (self.command_time <= 0).nonzero(as_tuple=True)[0]
             self._sample_motion_goals(due_motion)
             due_height = due_motion

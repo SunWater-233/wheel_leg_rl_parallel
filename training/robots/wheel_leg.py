@@ -121,6 +121,7 @@ class WheelLegFlatEnv(FlatEnv):
     min_height = 0.12
     wheel_radius = 0.058
     leg_torque_limit = 12.0
+    wheel_torque_limit = 5.0
     leg_action_scale = 0.20
     leg_joints = ("hip_L", "hip_R", "hipknee_L", "hipknee_R")
     wheel_joints = ("wheel_L", "wheel_R")
@@ -159,7 +160,7 @@ class WheelLegFlatEnv(FlatEnv):
         # Convert the static hip torque needed at the neutral pose into a PD target offset.
         self.leg_bias = self.robot.get_qpos().new_tensor((-4.25, 4.30, 4.31, -4.32)) / leg_kp
         robot.set_dofs_kv([0.6] * 2, self.wheel_dofs)
-        robot.set_dofs_force_range([-5.0] * 2, [5.0] * 2, self.wheel_dofs)
+        robot.set_dofs_force_range([-self.wheel_torque_limit] * 2, [self.wheel_torque_limit] * 2, self.wheel_dofs)
         robot.set_dofs_damping([5.0] * 2, self.spring_dofs)
         self.spring_forces = self.robot.get_qpos().new_full((self.num_envs, 2), 200.0)
         self.gimbal_dofs = self._dofs(("gimbal_yaw_joint", "gimbal_pitch_joint"))

@@ -24,11 +24,12 @@ class BrakingPitchCost:
         self.recovery_elapsed[ids] = 0.0
         self.distance_error[ids] = 0.0
 
-    def __call__(self, forward, goal, measured_forward, pitch_projection, pitch_rate, eligible):
+    def __call__(self, forward, goal, measured_forward, pitch_projection, pitch_rate, eligible, *, suspended=None):
         cfg = self.settings
         reference_speed = forward.abs()
         previous_speed = self.previous_forward.abs()
-        stop_requested = eligible & (goal.abs() <= cfg["zero_speed"])
+        brake_eligible = eligible if suspended is None else eligible | suspended
+        stop_requested = brake_eligible & (goal.abs() <= cfg["zero_speed"])
         start = (stop_requested & (self.direction == 0.0) & (previous_speed >= cfg["start_speed"])
                  & (reference_speed < previous_speed))
         direction = torch.where(start, self.previous_forward.sign(), self.direction)
@@ -36,14 +37,14 @@ class BrakingPitchCost:
         self.previous_forward.copy_(forward)
 
         recovering = (direction != 0.0) & (reference_speed <= cfg["zero_speed"])
-        self.recovery_elapsed.copy_(torch.where(recovering, self.recovery_elapsed + self.dt, 0.0))
+        self.recovery_elapsed.copy_(torch.where(recovering, self.recovery_elapsed + self.dt * eligible, 0.0))
         active = (direction != 0.0) & (self.recovery_elapsed <= cfg["recovery_seconds"])
         self.direction.copy_(direction.masked_fill(~active, 0.0))
 
         # Integrate travel along the commanded braking direction against the slew-limited reference.
         measured_speed = (measured_forward * direction).clamp_min(0.0)
         distance_step = (measured_speed - reference_speed) * self.dt
-        self.distance_error.copy_(torch.where(active, self.distance_error + distance_step, 0.0))
+        self.distance_error.copy_(torch.where(active, self.distance_error + distance_step * eligible, 0.0))
         excess_distance = (self.distance_error - cfg["distance_tolerance"]).clamp_min(0.0)
         zero = torch.zeros_like(forward)
         rate_cost = smooth_l1_loss(pitch_rate / cfg["pitch_rate_scale"], zero, reduction="none")
@@ -51,7 +52,7 @@ class BrakingPitchCost:
         speed_cost = smooth_l1_loss(measured_forward / cfg["recovery_speed_scale"], zero, reduction="none")
         distance_cost = smooth_l1_loss(excess_distance / cfg["distance_scale"], zero, reduction="none")
         recovery_cost = cfg["recovery_pitch_weight"] * pitch_cost + cfg["recovery_speed_weight"] * speed_cost
-        return active * (
+        return (active & eligible) * (
             cfg["pitch_rate_weight"] * rate_cost
             + recovering * recovery_cost
             + cfg["distance_weight"] * distance_cost
@@ -213,6 +214,9 @@ class ScutRoughReward:
         forward_error = forward_target - measured_forward
         yaw_error = yaw_target - ang_vel[:, 2]
         height_error = env.body_clearance - (env.commands[:, 2] + env.body_height_offset)
+        if tracking["use_projected_leg_height"]:
+            projected_error = env.measured_heights.mean(dim=1) - env.commands[:, 2]
+            height_error = torch.where(airborne, height_error, projected_error)
         forward_clip = tracking["forward_error_clip"]
         yaw_clip = tracking["yaw_error_clip"]
         height_clip = tracking["height_error_clip"]
@@ -267,8 +271,13 @@ class ScutRoughReward:
         )
         reward = tracking_reward - regularization_cost
         if self.braking_cost is not None:
-            eligible = (env.surface == 0) & ~airborne & ~fallen
-            reward -= self.braking_cost(forward, env.goals[:, 0], measured_forward, gx, ang_vel[:, 1], eligible)
+            on_transition = (env.surface != 0) & getattr(env, "transition_course", False)
+            eligible = ((env.surface == 0) | on_transition) & ~airborne & ~fallen
+            suspended = None
+            if self.settings["braking"]["preserve_across_airborne"]:
+                suspended = on_transition & airborne & ~fallen
+            reward -= self.braking_cost(forward, env.goals[:, 0], measured_forward, gx, ang_vel[:, 1], eligible,
+                                        suspended=suspended)
         if self.minimum_body_clearance is None:
             return reward
         offsets = wheels - env.robot.get_pos()[:, None]

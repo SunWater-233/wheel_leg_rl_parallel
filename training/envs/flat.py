@@ -18,13 +18,14 @@ class FlatEnv(VecEnv):
     num_actions = 6
     task_name = "flat"
     wheel_target_limit = 100.0
+    wheel_target_delay_steps = 0
     leg_signs = (1.0, 1.0, 1.0, 1.0)
     wheel_signs = (1.0, 1.0)
 
     def __init__(self, model_path, num_envs, episode_seconds=None, viewer=False, *, task_config=None,
-                 training_view_fps=None):
+                 training_view_fps=None, keyboard_view=False):
         self.on_step = None
-        self.step_visualizer = training_view_fps is None
+        self.step_visualizer = training_view_fps is None and not keyboard_view
         self.device = gs.device
         self.num_envs = num_envs
         self.control_dt = self.physics_dt * self.decimation
@@ -39,10 +40,12 @@ class FlatEnv(VecEnv):
             sim_options=gs.options.SimOptions(dt=self.physics_dt, substeps=1),
             rigid_options=gs.options.RigidOptions(enable_self_collision=False, batch_links_info=batched_dynamics,
                                                   batch_dofs_info=batched_dynamics),
-            vis_options=gs.options.VisOptions(rendered_envs_idx=None if self.step_visualizer else [0]),
+            vis_options=gs.options.VisOptions(rendered_envs_idx=None if self.step_visualizer else [0],
+                                              shadow=not keyboard_view),
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(1.3, -1.5, 0.8), camera_lookat=(0, 0, self.height_target),
-                refresh_rate=training_view_fps or 60,
+                res=(800, 600) if keyboard_view else None,
+                refresh_rate=training_view_fps or (24 if keyboard_view else 60),
             ),
         )
         material = gs.materials.Rigid(friction=task["friction"])
@@ -153,14 +156,27 @@ class FlatEnv(VecEnv):
     def _after_step(self, extras, done, lin_vel, ang_vel):
         pass
 
+    def _apply_controls(self, actions):
+        self._drive(actions)
+        wheel_target = (actions[:, 4:] * 10.0).clamp(-self.wheel_target_limit, self.wheel_target_limit)
+        self.robot.control_dofs_velocity(wheel_target * self.wheel_direction, self.wheel_dofs)
+        return actions
+
+    def _episode_timeout(self):
+        return self.episode_length_buf >= self.max_episode_length
+
     def step(self, actions):
         if actions.shape != self.last_actions.shape:
             raise ValueError(f"Expected actions shaped {tuple(self.last_actions.shape)}, got {tuple(actions.shape)}")
         actions = actions.clamp(-10.0, 10.0)
-        self._drive(actions)
-        wheel_target = (actions[:, 4:] * 10.0).clamp(-self.wheel_target_limit, self.wheel_target_limit)
-        self.robot.control_dofs_velocity(wheel_target * self.wheel_direction, self.wheel_dofs)
-        for _ in range(self.decimation):
+        delay = self.wheel_target_delay_steps
+        if delay:
+            # Update the legs immediately and hold the previous wheel targets until the delayed step.
+            previous_wheels = torch.cat((actions[:, :4], self.last_actions[:, 4:]), dim=1)
+            self._apply_controls(previous_wheels)
+        for substep in range(self.decimation):
+            if substep == delay:
+                actions = self._apply_controls(actions)
             self._apply_springs()
             self.scene.step(update_visualizer=self.step_visualizer)
 
@@ -168,7 +184,7 @@ class FlatEnv(VecEnv):
         lin_vel, ang_vel, gravity, height = self._base_state()
         contact = self.robot.get_links_net_contact_force()
         fallen, out_of_bounds = self._termination(height, gravity, contact)
-        time_outs = ((self.episode_length_buf >= self.max_episode_length) | out_of_bounds) & ~fallen
+        time_outs = (self._episode_timeout() | out_of_bounds) & ~fallen
         done = fallen | time_outs
         reward = self.control_dt * self.scut_reward(lin_vel, ang_vel, gravity, contact, fallen, actions)
         extras = {

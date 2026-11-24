@@ -17,7 +17,8 @@ import torch
 
 from configs.experiment import (MAX_FORWARD_SPEED, SNAPSHOT_NAME, TRAINING_DIR, load_config, load_snapshot,
                                 runner_config, save_run_config)
-from envs.terrain import SCUT_GROUND_COMPOUND_SURFACES, SCUT_GROUND_SINGLE_SIDE_SURFACES, SCUT_V1_SURFACES, TERRAIN_LANES
+from envs.terrain import (SCUT_GROUND_COMPOUND_SURFACES, SCUT_GROUND_SINGLE_SIDE_SURFACES, SCUT_GROUND_SPEED_BUMP,
+                          SCUT_V1_SURFACES, TERRAIN_LANES)
 from robots.scut import WheelbipeFlatEnv
 from robots.wheel_leg import WheelLegFlatEnv
 from robots.wheel_leg_locomotion import WheelLegLocomotionEnv
@@ -49,6 +50,16 @@ class RobotRunner(OnPolicyRunner):
 
     def log(self, locs, width=80, pad=35):
         super().log(locs, width, pad)
+        if getattr(self.env, "transition_course", False):
+            peak = self.env.transition_peak_command.masked_fill(self.env.surface == 0, 0.0).max().item()
+            self.writer.add_scalar("Transition/max_live_command_m_s", peak, locs["it"])
+        if getattr(self.env, "recovery_fraction", 0.0):
+            attempts, successes = self.env.recovery_counts.tolist()
+            self.env.recovery_counts.zero_()
+            if attempts:
+                self.writer.add_scalar("Recovery/attempts", attempts, locs["it"])
+                self.writer.add_scalar("Recovery/success_rate", successes / attempts, locs["it"])
+                print(f"Low recovery stable: {successes}/{attempts} ({successes / attempts:.1%})", flush=True)
         if self.capped_action_std is not None:
             self.writer.add_scalar("Policy/max_noise_std", self.capped_action_std.detach().max().item(), locs["it"])
         if self.live_view is None:
@@ -69,7 +80,16 @@ class RobotRunner(OnPolicyRunner):
         )
 
 
-def load_checkpoint(runner, path, *, load_optimizer):
+def add_actor_speed_input(module, state, prefix, *_):
+    name = f"{prefix}actor.0.weight"
+    old = state.get(name)
+    weight = module.actor[0].weight
+    if old is not None and old.shape == (weight.shape[0], weight.shape[1] - 1):
+        state[name] = torch.nn.functional.pad(old, (0, 1))
+        print("Initialized actor speed input with zero weights", flush=True)
+
+
+def load_checkpoint(runner, path, *, load_optimizer, initialize_actor_speed=False):
     def add_critic_inputs(module, state, prefix, *_):
         name = f"{prefix}critic.0.weight"
         old = state.get(name)
@@ -83,6 +103,8 @@ def load_checkpoint(runner, path, *, load_optimizer):
         print(f"Initialized {extra_dims} terrain critic inputs with zero weights", flush=True)
 
     with ExitStack() as stack:
+        if initialize_actor_speed:
+            stack.enter_context(runner.alg.policy.register_load_state_dict_pre_hook(add_actor_speed_input))
         if isinstance(runner.env, WheelLegLocomotionEnv) and runner.env.critic_scan_offsets is not None:
             stack.enter_context(runner.alg.policy.register_load_state_dict_pre_hook(add_critic_inputs))
         info = runner.load(str(path), load_optimizer=load_optimizer, map_location=str(runner.env.device)) or {}
@@ -97,7 +119,9 @@ def load_checkpoint(runner, path, *, load_optimizer):
 def train(env, options, output, settings, live_view=None):
     if isinstance(env, WheelLegLocomotionEnv):
         env.enable_observation_noise()
-    runner = RobotRunner(env, runner_config(settings["ppo"]), log_dir=str(output), device=str(env.device))
+    actor_speed = getattr(env, "actor_true_forward_speed", False)
+    runner = RobotRunner(env, runner_config(settings["ppo"], actor_true_forward_speed=actor_speed),
+                         log_dir=str(output), device=str(env.device))
     runner.live_view = live_view
     if options.resume is not None:
         load_checkpoint(runner, options.resume, load_optimizer=True)
@@ -106,7 +130,7 @@ def train(env, options, output, settings, live_view=None):
         runner.current_learning_iteration += 1
         print(f"Resuming at iteration {runner.current_learning_iteration} from {options.resume}", flush=True)
     elif options.init_checkpoint is not None:
-        load_checkpoint(runner, options.init_checkpoint, load_optimizer=False)
+        load_checkpoint(runner, options.init_checkpoint, load_optimizer=False, initialize_actor_speed=actor_speed)
         runner.current_learning_iteration = 0
         print(f"Initializing from {options.init_checkpoint} with a fresh optimizer", flush=True)
     runner.limit_exploration(settings["ppo"]["max_action_std"])
@@ -218,7 +242,8 @@ def drive_target(axis, limits, magnitude=None):
 def demo(env, options, ppo, live_view=None):
     policy = None
     if options.checkpoint is not None:
-        runner = OnPolicyRunner(env, runner_config(ppo), device=str(env.device))
+        cfg = runner_config(ppo, actor_true_forward_speed=getattr(env, "actor_true_forward_speed", False))
+        runner = OnPolicyRunner(env, cfg, device=str(env.device))
         load_checkpoint(runner, options.checkpoint, load_optimizer=False)
         policy = runner.get_inference_policy(device=env.device)
 
@@ -232,7 +257,7 @@ def demo(env, options, ppo, live_view=None):
     if options.keyboard and (live_view is None or not live_view.stream):
         from tools.viewer_drive import ViewerDrive
 
-        native_drive = viewer.add_plugin(ViewerDrive(enable_height=locomotion))
+        native_drive = viewer.add_plugin(ViewerDrive(enable_height=locomotion, enable_reset=options.free_drive))
         camera_follow = native_drive
         motion_input = native_drive
         if not locomotion:
@@ -241,6 +266,8 @@ def demo(env, options, ppo, live_view=None):
               f"forward speed limit {drive_speed:g} m/s", flush=True)
         if locomotion:
             print("Z/X raise/lower the continuous body-height target", flush=True)
+        if options.free_drive:
+            print("Free drive: full course, no episode timer; R returns to spawn", flush=True)
     elif viewer is not None:
         from tools.viewer_drive import ViewerFollow
 
@@ -252,7 +279,7 @@ def demo(env, options, ppo, live_view=None):
         default_height = env.drop_approach_height if env.forward_drop and options.surface == "cliff" else env.height_nominal
         height_sequence = options.height_sequence or [options.height or default_height]
         env.begin_demo(height_sequence[0], options.surface or "flat", reverse=options.speed < 0.0,
-                       variant=(options.terrain_variant or 1) - 1)
+                       variant=(options.terrain_variant or 1) - 1, free_drive=options.free_drive)
         if env.lanes is not None:
             print(f"Terrain: {env.terrain_description()}", flush=True)
         height_request = height_sequence[0]
@@ -262,7 +289,7 @@ def demo(env, options, ppo, live_view=None):
     if native_monitor:
         attach_local_view(env, live_view, camera_follow, options.live_fps or 60)
     elif camera_follow is not None:
-        camera_follow.show_terrain(env.terrain_description())
+        camera_follow.show_terrain("Free drive" if options.free_drive else env.terrain_description())
     last_x = env.robot.get_pos()[0, 0].item()
     travelled = 0.0
     resets = 0
@@ -281,6 +308,11 @@ def demo(env, options, ppo, live_view=None):
         if viewer is not None and not viewer.is_alive():
             return
         seconds = i * control_dt
+        if native_drive is not None and native_drive.take_reset_request():
+            env.reset()
+            height_request = height_sequence[0]
+            last_x = env.robot.get_pos()[0, 0].item()
+            resets += 1
         if options.keyboard:
             forward, turn = motion_input.motion_axes()
             vx_cmd = drive_target(forward, forward_limits, drive_speed)
@@ -326,6 +358,9 @@ def demo(env, options, ppo, live_view=None):
         if camera_follow is not None and not native_monitor:
             x, y = position[:2].tolist()
             camera_follow.follow_position(x, y)
+            if native_drive is not None:
+                # The viewer throttles redraws independently of the 50 Hz control loop.
+                viewer.update()
         else:
             x = position[0].item()
         if not done[0]:
@@ -340,9 +375,10 @@ def demo(env, options, ppo, live_view=None):
                       f"ref={body_reference * 100:.1f}cm goal={(height_request + env.body_height_offset) * 100:.1f}cm "
                       f"pitch={extras['pitch_deg'][0].item():+.1f}deg"
                       if locomotion else "")
-            print(f"t={seconds + control_dt:.2f}s x={x:+.3f}m z={position[2].item():.3f}m "
+            lateral = f" y={position[1].item():.3f}m" if options.free_drive else ""
+            print(f"t={seconds + control_dt:.2f}s x={x:+.3f}m{lateral} z={position[2].item():.3f}m "
                   f"vx={vx:+.3f}m/s target={vx_cmd:+.2f}m/s{yaw}{height} resets={resets}", flush=True)
-        if live_view is not None:
+        if live_view is not None or native_drive is not None:
             now = monotonic()
             next_step = max(now, next_step + control_dt)
             if next_step > now:
@@ -384,7 +420,8 @@ def main():
     heights.add_argument("--height", type=float, help="Demo hip-to-wheel height in meters")
     heights.add_argument("--height-sequence", type=float, nargs="+", help="Successive demo leg-height targets in meters")
     parser.add_argument("--height-hold", type=float, default=2.0, help="Seconds between demo height targets")
-    parser.add_argument("--surface", choices=SCUT_V1_SURFACES + SCUT_GROUND_COMPOUND_SURFACES + SCUT_GROUND_SINGLE_SIDE_SURFACES,
+    parser.add_argument("--surface", choices=(SCUT_V1_SURFACES + SCUT_GROUND_COMPOUND_SURFACES
+                                             + SCUT_GROUND_SINGLE_SIDE_SURFACES + (SCUT_GROUND_SPEED_BUMP, "transitions")),
                         help="Spawn on this lane when replaying a terrain policy")
     parser.add_argument("--terrain-variant", type=int, help="Select a 1-based lane difficulty when replaying")
     parser.add_argument("--terrain-seed", type=int, help="Override the mixed-terrain layout seed")
@@ -395,6 +432,8 @@ def main():
     parser.add_argument("--live-stream", action="store_true", help="Stream training frames to the browser instead of opening Genesis")
     parser.add_argument("--live-telemetry", action="store_true", help="Use a Genesis window and a telemetry-only dashboard for demo")
     parser.add_argument("--keyboard", action="store_true", help="Drive a PPO demo in Genesis, or in the browser with --live-port")
+    parser.add_argument("--free-drive", action="store_true",
+                        help="Drive across all terrain lanes without a time limit in the native Genesis viewer")
     parser.add_argument("--video", type=Path, help="Save a replay of env 0 as an MP4")
     checkpoint_args = parser.add_mutually_exclusive_group()
     checkpoint_args.add_argument("--checkpoint", type=Path, help="Replay a PPO checkpoint in demo mode")
@@ -415,6 +454,8 @@ def main():
     if args.live_telemetry and (args.mode != "demo" or args.live_port is None):
         parser.error("--live-telemetry requires demo mode and --live-port")
     native_keyboard = args.keyboard and (args.live_port is None or args.live_telemetry)
+    if args.free_drive and not (native_keyboard and args.live_port is None):
+        parser.error("--free-drive requires native --keyboard without --live-port")
     if args.live_telemetry:
         args.viewer = True
     if native_keyboard:
@@ -478,6 +519,8 @@ def main():
     if body_heights and (not locomotion["enabled"] or any(not isfinite(height) for height in body_heights)):
         parser.error("Body heights require a locomotion checkpoint and finite targets")
     lane_class = TERRAIN_LANES.get(locomotion["terrain"])
+    if args.free_drive and (not locomotion["enabled"] or lane_class is None or locomotion["cliff_drop_heights"]):
+        parser.error("--free-drive requires terrain locomotion without separate cliff decks")
     if args.surface:
         if not locomotion["enabled"] or lane_class is None or args.surface not in lane_class.surface_names(locomotion):
             parser.error("--surface must name a lane in the selected locomotion terrain")
@@ -544,8 +587,12 @@ def main():
         if live_view is not None:
             stack.callback(live_view.stop_rendering)
         print(f"Building {num_envs} Genesis environments on {gs.device}...", flush=True)
+        preview_options = {}
+        if native_keyboard and args.surface and not (args.free_drive or locomotion["cliff_drop_heights"]):
+            preview_options["preview_lane"] = (args.surface, (args.terrain_variant or 1) - 1)
         env = env_class(args.model, num_envs, viewer=args.viewer or local_training_view,
-                        task_config=settings["task"], training_view_fps=training_view_fps)
+                        task_config=settings["task"], training_view_fps=training_view_fps, keyboard_view=native_keyboard,
+                        **preview_options)
         if body_heights:
             low = env.height_low + env.body_height_offset
             high = env.height_high + env.body_height_offset

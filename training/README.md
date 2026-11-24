@@ -92,6 +92,50 @@ uv run --locked main.py demo --checkpoint outputs/v02_scut_ground_080_std_cap/mo
 
 `--surface` 可选 `flat`、`slope`、`inv_slope`、`rough`、`bars`、`stairs`、`inv_stairs_low`、`inv_stairs_high`。启用复合地形后可选 `rough_slope` 和 `staggered_bars`，启用单侧凸条后可选 `single_side_bars_left` 和 `single_side_bars_right`。通过 `--terrain-variant` 选择难度，正负 `--speed` 检查两个方向。TensorBoard 的 `Episode/terrain_progress_m` 记录车体相对出生点的最大纵向位移。
 
+### 过坎恢复验收
+
+从 `training` 目录运行以下命令。默认以 0.8 m/s 接近高 4 cm、沿行进方向宽 12 cm 的凸条，
+腿高目标为 20 cm。获得实测障碍尺寸后可用 `--bar-height` 和 `--bar-width` 代入。
+
+```powershell
+uv run --locked python -m tools.bump_acceptance --checkpoint outputs/v02_scut_ground_080_hjc_low_recovery_200_20261123/artifacts/model_199.pt --output outputs/bump_acceptance.csv
+```
+
+1. 6 s 内至少一个主轮与凸条接触，且两主轮轮心进入凸条后方并位于横向有效范围内。
+2. 越坎后发零速指令。2 s 内要求双轮承载、俯仰和横滚绝对值均不超过 8°，连续保持 0.24 s。
+   停车同样要求上述姿态和承载，并连续 0.24 s 满足实际纵向速度绝对值不超过 0.08 m/s。
+3. 发出默认 −0.5 m/s 的反向指令。2 s 内要求双轮承载、姿态回正、实际纵向速度为负且跟踪误差
+   不超过 0.15 m/s，连续保持 0.24 s。
+
+脚本输出各项达标的时间。超时项为 `null`。零速阶段超时后仍给反向指令，以便诊断，
+整体结果保留之前的失败。全部通过返回退出码 0，验收失败返回 1。可选 CSV 记录每拍的指令和车辆状态。
+
+### 曲面减速带与单边验收
+
+`python -m tools.terrain_obstacle_acceptance --output acceptance.csv --trace traces.csv CHECKPOINT_A CHECKPOINT_B`
+在同一 Genesis 场景比较多个模型。每个模型覆盖双轮、仅左轮和仅右轮三种接触工况，
+默认以 0.55 和 0.80 m/s 接近。两个单边工况使用镜像路面，并检查另一侧主轮是否接触凸起。
+通过后依次检查双轮承载、姿态回正、停稳和反向速度跟踪。逐帧数据按 50 Hz 输出。
+
+默认凸起尺寸为仿真工况的高 4 cm、沿行进方向长 30 cm。实测后用
+`--bump-height` 和 `--bump-length` 替换。默认轮速目标延迟 5 个物理步，即 10 ms。
+
+### 本机 sim2real 平地短训
+
+`configs/v02_sim2real_flat_height.toml` 从 20 cm 开始循环 `20 → 24 → 20 → 33 → 20 cm`。
+平地回合约 40% 用于升降、40% 用于启停和行驶、20% 从低位恢复姿态起步。
+腿部伺服沿用已有参数和 40 N·m 限幅。轮端限幅为 5 N·m，轮速目标延迟五个物理步（10 ms）。
+训练地点为平地。
+
+```powershell
+uv run --locked main.py train --config configs/v02_sim2real_flat_height.toml --init-checkpoint outputs/v02_scut_ground_080_hjc_low_recovery_200_20261123/artifacts/model_199.pt --num-envs 1024 --iterations 100 --output outputs/flat_height_trial --live-port 6016 --live-stream --live-fps 6
+uv run --locked python -m tools.flat_height_acceptance --config configs/v02_sim2real_flat_height.toml --output outputs/flat_height_trial/acceptance.csv outputs/v02_scut_ground_080_hjc_low_recovery_200_20261123/artifacts/model_199.pt outputs/flat_height_trial/model_99.pt
+```
+
+训练时打开 [本机监控](http://127.0.0.1:6016/)。平地验收对每个 checkpoint 执行相同的静态和双向行驶升降序列，
+检查启停换向、匀速时轮轴前后摆幅，以及四组低位恢复。可以用 `--wheel-torque` 或 `--wheel-delay-steps`
+对同一批 checkpoint 做轮端参数对照。
+
 ## 旧平地 PPO 短训与回放
 
 ```powershell

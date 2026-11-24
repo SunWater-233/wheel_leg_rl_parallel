@@ -58,13 +58,19 @@ class ViewerFollow(ViewerPlugin):
 class ViewerDrive(ViewerFollow):
     motion_keys = frozenset((Key.W, Key.S, Key.A, Key.D))
 
-    def __init__(self, *, enable_height=False):
+    def __init__(self, *, enable_height=False, enable_reset=False):
         super().__init__()
         if enable_height:
             self.motion_keys = self.motion_keys | {Key.Z, Key.X}
         self.pressed = set()
+        self.enable_reset = enable_reset
+        self.reset_requested = False
 
     def on_key_press(self, symbol, modifiers):
+        if self.enable_reset and symbol == Key.R:
+            self.pressed.clear()
+            self.reset_requested = True
+            return EVENT_HANDLED
         if symbol == Key.SPACE:
             self.pressed.clear()
             return EVENT_HANDLED
@@ -87,3 +93,9 @@ class ViewerDrive(ViewerFollow):
     def height_axis(self):
         keys = self.pressed.copy()
         return (Key.Z in keys) - (Key.X in keys)
+
+    def take_reset_request(self):
+        if not self.reset_requested:
+            return False
+        self.reset_requested = False
+        return True

@@ -253,3 +253,18 @@ uv run --locked convert_wheelbipe.py
 ```
 
 转换脚本默认读取同一工作区内 `Ref_Git/wheeled-legged_RL` 的原版 USD。`--usd` 可以指定其他路径下的同一资产，`--output` 可以指定输出位置。资产的授权见 [SCUTRobotLab-LICENSE.txt](assets/SCUTRobotLab-LICENSE.txt)。
+
+
+## Demo run log (sim log)
+
+Every `main.py demo` run (including `--keyboard`) automatically records env 0 to
+`outputs/sim_logs/<timestamp>_<run>/`; use `--sim-log DIR` to choose the folder or `--no-sim-log` to disable it.
+
+- `telemetry.csv`: one row per 50 Hz control step: key input, target/sloped commands, pose, body velocities,
+  leg/wheel joint states and torques, policy actions, wheel/body contact forces, saturation flags, chassis mode
+  (NORMAL / RESCUE / GETUP) and the real-time factor.
+- `events.log`: timeline of key presses, mode switches, resets and warnings (leg/wheel torque saturation, wheel
+  lift-off, large pitch/roll, speed/yaw tracking errors, body contact, slow simulation). Each fall lists why the
+  env flagged it and a heuristic list of likely causes from the preceding seconds.
+- `incidents/fall_XXX.csv` + `fall_XXX.html`: 3 s before to 1 s after each fall; open the HTML offline for charts.
+- `meta.json` / `summary.json`: run options, torque limits and event counts.

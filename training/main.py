@@ -288,8 +288,24 @@ def drive_target(axis, limits, magnitude=None):
     return axis * (limit if magnitude is None else min(limit, magnitude))
 
 
-@torch.inference_mode()
 def demo(env, options, ppo, live_view=None):
+    sim_log = None
+    if options.sim_log is not None and (len(env.leg_dofs), len(env.wheel_dofs)) != (4, 2):
+        print("Simulation log skipped: it expects the 4-leg-motor / 2-wheel V0.2 layout", flush=True)
+    elif options.sim_log is not None:
+        from tools.sim_logger import SimLogger
+
+        sim_log = SimLogger(options.sim_log, env, options)
+        print(f"Simulation log: {sim_log.directory} (telemetry.csv / events.log / incidents/)", flush=True)
+    try:
+        _demo(env, options, ppo, live_view, sim_log)
+    finally:
+        if sim_log is not None:
+            sim_log.close()
+
+
+@torch.inference_mode()
+def _demo(env, options, ppo, live_view=None, sim_log=None):
     policy = None
     if options.checkpoint is not None:
         cfg = runner_config(
@@ -361,6 +377,8 @@ def demo(env, options, ppo, live_view=None):
         from robots.wheel_leg_rescue import FallSelfRighting
 
         self_righting = FallSelfRighting(env, options.model)
+        if sim_log is not None:
+            sim_log.mode_source = self_righting.mode_name
         print("Fall handling: no reset on fall; firmware RESCUE -> GETUP self-righting, then the policy resumes "
               "(use --fall-reset for the old behaviour)", flush=True)
     elif options.keyboard and options.fall_reset:
@@ -422,6 +440,8 @@ def demo(env, options, ppo, live_view=None):
             env.reset()
             if self_righting is not None:
                 self_righting.cancel()
+            if sim_log is not None:
+                sim_log.event("USER_RESET", "按 R 回到出生点", t=seconds)
             height_request = height_sequence[0]
             if command_slope is not None:
                 command_slope.reset(height=height_request)
@@ -492,6 +512,14 @@ def demo(env, options, ppo, live_view=None):
                 print(f"t={seconds + control_dt:.2f}s fall detected: firmware RESCUE/GETUP engaged", flush=True)
             if finished[0].item():
                 print(f"t={seconds + control_dt:.2f}s self-righting finished: policy control resumed", flush=True)
+        if sim_log is not None:
+            if options.keyboard:
+                key_height = native_drive.height_axis() if native_drive is not None and locomotion else 0
+                inputs = (forward, turn, key_height, vx_target, yaw_target,
+                          height_request if locomotion else float("nan"))
+            else:
+                inputs = (0, 0, 0, vx_cmd, yaw_cmd, height_request if locomotion else float("nan"))
+            sim_log.step(seconds + control_dt, actions, extras, done, inputs)
         if command_slope is not None and done[0].item():
             command_slope.reset(height=height_request if locomotion else None)
         qpos = env.robot.get_qpos()
@@ -620,6 +648,10 @@ def main():
                         help="Drive across all terrain lanes without a time limit in the native Genesis viewer")
     parser.add_argument("--fall-reset", action="store_true",
                         help="Keyboard demo: reset on fall instead of the firmware RESCUE/GETUP self-righting")
+    sim_logs = parser.add_mutually_exclusive_group()
+    sim_logs.add_argument("--sim-log", type=Path,
+                          help="Demo run log directory (default: outputs/sim_logs/<timestamp>, always on in demo)")
+    sim_logs.add_argument("--no-sim-log", action="store_true", help="Disable the automatic demo run log")
     parser.add_argument("--video", type=Path, help="Save a replay of env 0 as an MP4")
     checkpoint_args = parser.add_mutually_exclusive_group()
     checkpoint_args.add_argument("--checkpoint", type=Path, help="Replay a PPO checkpoint in demo mode")
@@ -775,6 +807,12 @@ def main():
     args.model = args.model or env_class.model_path
     if not args.model.is_file():
         parser.error(f"Model not found: {args.model}")
+    if args.mode == "demo" and not args.no_sim_log and args.sim_log is None:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = args.checkpoint.parent.name if args.checkpoint is not None else "scripted"
+        args.sim_log = TRAINING_DIR / "outputs" / "sim_logs" / f"{stamp}_{run_name}"
+    if args.no_sim_log:
+        args.sim_log = None
 
     try:
         if "model_sha256" in run and sha256(args.model.read_bytes()).hexdigest() != run["model_sha256"]:

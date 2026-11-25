@@ -24,7 +24,7 @@ class FlatEnv(VecEnv):
     wheel_signs = (1.0, 1.0)
 
     def __init__(self, model_path, num_envs, episode_seconds=None, viewer=False, *, task_config=None,
-                 training_view_fps=None, keyboard_view=False):
+                 training_view_fps=None, keyboard_view=False, viewer_fps=None):
         self.on_step = None
         self.step_visualizer = training_view_fps is None and not keyboard_view
         self.device = gs.device
@@ -46,7 +46,7 @@ class FlatEnv(VecEnv):
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(1.3, -1.5, 0.8), camera_lookat=(0, 0, self.height_target),
                 res=(800, 600) if keyboard_view else None,
-                refresh_rate=training_view_fps or 60,
+                refresh_rate=viewer_fps or training_view_fps or (30 if keyboard_view else 60),
             ),
         )
         material = gs.materials.Rigid(friction=task["friction"])
@@ -75,6 +75,8 @@ class FlatEnv(VecEnv):
         self.body_clearance = self.commands.new_zeros(num_envs)
         self.body_height_offset = 0.0
         self.last_actions = torch.zeros((num_envs, self.num_actions), device=self.device)
+        # Demo drivers may clear this to keep fallen robots in the scene and stand them back up.
+        self.reset_on_fall = True
         termination = self.cfg["termination"]
         self.instant_pitch_rad = radians(termination["instant_pitch_deg"])
         self.sustained_pitch_rad = radians(termination["sustained_pitch_deg"])
@@ -210,8 +212,13 @@ class FlatEnv(VecEnv):
         lin_vel, ang_vel, gravity, height = self._base_state()
         contact = self.robot.get_links_net_contact_force()
         fallen, out_of_bounds = self._termination(height, gravity, contact)
-        time_outs = (self._episode_timeout() | out_of_bounds) & ~fallen
-        done = fallen | time_outs
+        time_outs = self._episode_timeout() | out_of_bounds
+        if self.reset_on_fall:
+            time_outs = time_outs & ~fallen
+            done = fallen | time_outs
+        else:
+            # Falls are still reported in extras, but the episode keeps running (e.g. for self-righting).
+            done = time_outs
         reward = self.control_dt * self.scut_reward(lin_vel, ang_vel, gravity, contact, fallen, actions)
         extras = {
             "time_outs": time_outs,

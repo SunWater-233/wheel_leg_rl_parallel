@@ -1,6 +1,6 @@
 """Firmware-style RESCUE and GETUP, using the Genesis CAD linkage for VMC."""
 
-from math import pi
+from math import ceil, cos, pi, radians
 import xml.etree.ElementTree as ET
 
 from genesis.utils.geom import inv_transform_by_quat, transform_by_quat
@@ -227,3 +227,106 @@ class FirmwareRecovery:
             forces = torch.cat((joint_torque, wheel_torque * self.env.wheel_direction), dim=1)
             self.env.robot.control_dofs_force(forces[ids], self.env.action_dofs, envs_idx=ids)
         return length, valid
+
+
+class FallSelfRighting:
+    """Replace fall resets with the firmware state chain NORMAL -> RESCUE -> GETUP -> NORMAL.
+
+    The PPO policy drives normally. When the env reports a sustained fall, the batched port of
+    WL_Rescue/WL_GetUP takes over the leg and wheel motors (torque mode). Once GETUP has finished
+    and the chassis has been upright on both wheels for a short hold, control returns to the policy.
+    """
+
+    def __init__(self, env, model, *, detect_seconds=0.2, handover_seconds=0.1, retry_seconds=10.0):
+        self.env = env
+        self.controller = FirmwareRecovery(env, model)
+        self.controller.enabled.zero_()
+        self.active = False
+        self.fall_steps = torch.zeros_like(self.controller.mode)
+        self.ready_steps = torch.zeros_like(self.controller.mode)
+        self.elapsed_steps = torch.zeros_like(self.controller.mode)
+        self.detect_steps = max(1, ceil(detect_seconds / env.control_dt))
+        self.handover_steps = max(1, ceil(handover_seconds / env.control_dt))
+        self.retry_steps = max(1, ceil(retry_seconds / env.control_dt))
+        self.upright_cos = cos(radians(12.0))
+        env.reset_on_fall = False
+        springs = env._apply_springs
+
+        def apply_springs():
+            springs()
+            if self.active:
+                self.controller.advance()
+
+        env._apply_springs = apply_springs
+
+    @property
+    def enabled(self):
+        return self.controller.enabled
+
+    def mask_actions(self, actions):
+        """Zero policy actions of recovering envs so last_actions and the logged commands stay clean."""
+        return actions.masked_fill(self.controller.enabled[:, None], 0.0) if self.active else actions
+
+    def start(self, mask):
+        c = self.controller
+        if not self.active:
+            # The length-rate filter only updates while the controller runs.
+            c.last_length = None
+        c.mode.masked_fill_(mask, c.EXTEND)
+        c.ready.masked_fill_(mask, False)
+        for buffer in (c.wait, c.hold, c.boost):
+            buffer.masked_fill_(mask, 0.0)
+        for buffer in (c.stall, c.stall_boost, c.rate_integral, c.last_rate, c.rate_derivative, c.length_rate):
+            buffer.masked_fill_(mask[:, None], 0.0)
+        c.enabled |= mask
+        self.fall_steps.masked_fill_(mask, 0)
+        self.ready_steps.masked_fill_(mask, 0)
+        self.elapsed_steps.masked_fill_(mask, 0)
+        self.active = True
+
+    def cancel(self, mask=None):
+        if mask is None:
+            mask = torch.ones_like(self.controller.enabled)
+        self.controller.enabled &= ~mask
+        self.fall_steps.masked_fill_(mask, 0)
+        self.ready_steps.masked_fill_(mask, 0)
+        self.elapsed_steps.masked_fill_(mask, 0)
+        self.active = bool(self.controller.enabled.any())
+
+    def update(self, extras, done):
+        """Call once after env.step. Returns (started, finished) boolean masks."""
+        env, c = self.env, self.controller
+        if done.any():
+            self.cancel(done)
+        fallen = extras["fallen"] & ~c.enabled & ~done
+        self.fall_steps = torch.where(fallen, self.fall_steps + 1, 0)
+        started = self.fall_steps >= self.detect_steps
+        # Restart the firmware chain if a recovery attempt stalls.
+        retry = c.enabled & (self.elapsed_steps >= self.retry_steps)
+        if started.any() or retry.any():
+            self.start(started | retry)
+        if not self.active:
+            return started, torch.zeros_like(started)
+
+        self.elapsed_steps += c.enabled
+        _, ang, gravity, _ = env._base_state()
+        forces = env.robot.get_links_net_contact_force()
+        loaded = (forces[:, env.wheel_links, 2] > 5.0).all(dim=1)
+        body_contact = (forces[:, env.body_links].norm(dim=-1) > 10.0).any(dim=1)
+        safe = (c.enabled & c.ready & loaded & ~body_contact
+                & (-gravity[:, 2] > self.upright_cos) & (ang.norm(dim=1) < 0.8))
+        self.ready_steps = torch.where(safe, self.ready_steps + 1, 0)
+        finished = self.ready_steps >= self.handover_steps
+        if finished.any():
+            self.cancel(finished)
+            env.pitch_exceed_time.masked_fill_(finished, 0.0)
+            if getattr(env, "heading_hold_enabled", False):
+                env.heading_target.copy_(torch.where(finished, env._yaw_from_quat(env.robot.get_quat()),
+                                                     env.heading_target))
+        return started, finished
+
+    def mode_name(self, env_id=0):
+        if not bool(self.controller.enabled[env_id]):
+            return "NORMAL"
+        return ("RESCUE(extend)", "RESCUE(swing)", "RESCUE(single)", "GETUP(retract)",
+                "GETUP(balance)")[int(self.controller.mode[env_id])]

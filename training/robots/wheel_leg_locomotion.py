@@ -988,12 +988,12 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.demo_variant = variant
         self.reset()
 
-    def set_commands(self, forward, yaw, height):
+    def set_commands(self, forward, yaw, height, *, slew=True):
         self.goals[:] = self.commands.new_tensor((forward, yaw, height))
         lin_vel, ang_vel, _, _ = super()._base_state()
-        self._advance_commands(lin_vel, ang_vel)
+        self._advance_commands(lin_vel, ang_vel, slew=slew)
 
-    def _advance_commands(self, lin_vel, ang_vel):
+    def _advance_commands(self, lin_vel, ang_vel, *, slew=True):
         targets = self.goals.clamp(min=self.command_lower, max=self.command_upper)
         if self.heading_hold_enabled:
             requested_yaw = targets[:, 1]
@@ -1026,7 +1026,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                               self.wheel_target_limit * self.wheel_radius / outer_wheel.clamp_min(1e-6))
         desired = targets[:, :2] * scale.clamp_max(1.0)[:, None]
         direct_ep = getattr(self, "direct_episode", None)
-        if self.auto_commands and self.direct_velocity_commands and (direct_ep is None or direct_ep.all()):
+        if not slew or (self.auto_commands and self.direct_velocity_commands and (direct_ep is None or direct_ep.all())):
             self.commands[:, :2] = desired
         else:
             motion_delta = desired - self.commands[:, :2]

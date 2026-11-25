@@ -305,28 +305,66 @@ def demo(env, options, ppo, live_view=None):
     motion_input = live_view
     native_drive = None
     camera_follow = None
+    command_slope = None
     drive_speed = abs(options.speed)
     forward_limits = env.cfg["forward_command"]
     locomotion = isinstance(env, WheelLegLocomotionEnv)
+    # Keyboard driving keeps a fallen robot in the scene and stands it up with the firmware RESCUE/GETUP port.
+    use_self_righting = options.keyboard and locomotion and not options.fall_reset
     if options.keyboard and (live_view is None or not live_view.stream):
         from tools.viewer_drive import ViewerDrive
 
-        native_drive = viewer.add_plugin(ViewerDrive(enable_height=locomotion, enable_reset=options.free_drive))
+        native_drive = viewer.add_plugin(
+            ViewerDrive(
+                enable_height=locomotion,
+                enable_reset=options.free_drive or use_self_righting,
+                vx_accel=options.accel,
+                vx_decel=options.brake_accel,
+                wz_accel=options.yaw_accel,
+                wz_decel=options.yaw_brake_accel,
+            )
+        )
         camera_follow = native_drive
         motion_input = native_drive
+        command_slope = native_drive.command_slope
         if not locomotion:
             forward_limits = (-drive_speed, drive_speed)
-        print(f"Genesis keyboard drive: W/S forward/back, A/D steer, Space brake/stop, "
-              f"speed {drive_speed:g} m/s, accel {options.accel:g} / brake {options.brake_accel:g} m/s^2", flush=True)
+        print(
+            f"Genesis keyboard drive: W/S forward/back, A/D steer, Space brake/stop, "
+            f"speed {drive_speed:g} m/s, "
+            f"vx slope {options.accel:g}/{options.brake_accel:g} m/s^2 (real-first), "
+            f"yaw slope {options.yaw_accel:g}/{options.yaw_brake_accel:g} rad/s^2 (planning-first)",
+            flush=True,
+        )
         if locomotion:
             print("Z/X raise/lower the continuous body-height target", flush=True)
         if options.free_drive:
             print("Free drive: full course, no episode timer; R returns to spawn", flush=True)
+        elif use_self_righting:
+            print("R returns to spawn", flush=True)
+    elif options.keyboard:
+        from tools.command_slope import KeyboardCommandSlope
+
+        command_slope = KeyboardCommandSlope(
+            vx_accel=options.accel,
+            vx_decel=options.brake_accel,
+            wz_accel=options.yaw_accel,
+            wz_decel=options.yaw_brake_accel,
+        )
     elif viewer is not None:
         from tools.viewer_drive import ViewerFollow
 
         camera_follow = viewer.add_plugin(ViewerFollow())
 
+    self_righting = None
+    if use_self_righting:
+        from robots.wheel_leg_rescue import FallSelfRighting
+
+        self_righting = FallSelfRighting(env, options.model)
+        print("Fall handling: no reset on fall; firmware RESCUE -> GETUP self-righting, then the policy resumes "
+              "(use --fall-reset for the old behaviour)", flush=True)
+    elif options.keyboard and options.fall_reset:
+        print("Fall handling: reset on fall (--fall-reset)", flush=True)
     control_dt = env.control_dt
     steps = round(options.seconds / control_dt) if options.seconds is not None else None
     if locomotion:
@@ -342,114 +380,195 @@ def demo(env, options, ppo, live_view=None):
         if env.lanes is not None:
             print(f"Terrain: {env.terrain_description()}", flush=True)
         height_request = height_sequence[0]
+        if command_slope is not None:
+            command_slope.reset(height=height_request)
     else:
         env.reset()
+        if command_slope is not None:
+            command_slope.reset()
     native_monitor = live_view is not None and not live_view.stream
     if native_monitor:
         attach_local_view(env, live_view, camera_follow, options.live_fps or 60)
     elif camera_follow is not None:
         camera_follow.show_terrain("Free drive" if options.free_drive else env.terrain_description())
-    last_x = env.robot.get_pos()[0, 0].item()
-    travelled = 0.0
-    resets = 0
-    falls = 0
-    height_error = 0.0
-    saturated_steps = 0
+    last_x = env.robot.get_pos()[0, 0].clone()
+    travelled = env.commands.new_zeros(())
+    resets = torch.zeros((), dtype=torch.long, device=env.device)
+    falls = torch.zeros((), dtype=torch.long, device=env.device)
+    height_error = env.commands.new_zeros(())
+    saturated_steps = torch.zeros((), dtype=torch.long, device=env.device)
+    finite_ok = torch.ones((), dtype=torch.bool, device=env.device)
     if locomotion:
         posture_max = env.commands.new_zeros(3)
         pitch_peak = env.commands.new_zeros(())
-    wheel_contact_frames = 0
+    wheel_contact_frames = torch.zeros((), dtype=torch.long, device=env.device)
     speed_integral = torch.zeros_like(env.commands[:, 0])
     frames = []
     control_steps_per_frame = 2
+    log_interval = round(1.0 / control_dt)
+    viewer_fps = options.viewer_fps or (30 if native_drive is not None else 60)
+    render_interval = 1.0 / viewer_fps
     next_step = monotonic()
+    next_render = next_step
+    window_wall = next_step
+    window_steps = 0
     for i in count() if steps is None else range(steps):
         if viewer is not None and not viewer.is_alive():
             return
         seconds = i * control_dt
+        is_log_step = (i + 1) % log_interval == 0 or i + 1 == steps
+        is_video_step = options.video is not None and i % control_steps_per_frame == 0
         if native_drive is not None and native_drive.take_reset_request():
             env.reset()
+            if self_righting is not None:
+                self_righting.cancel()
             height_request = height_sequence[0]
-            last_x = env.robot.get_pos()[0, 0].item()
+            if command_slope is not None:
+                command_slope.reset(height=height_request)
+            last_x = env.robot.get_pos()[0, 0].clone()
             resets += 1
+            next_step = monotonic()
+        need_base_state = policy is None or is_log_step or is_video_step or command_slope is not None
+        if need_base_state:
+            lin_vel, ang_vel, gravity, _ = env._base_state()
         if options.keyboard:
             forward, turn = motion_input.motion_axes()
-            vx_cmd = drive_target(forward, forward_limits, drive_speed)
+            vx_target = drive_target(forward, forward_limits, drive_speed)
             yaw_cap = abs(options.yaw) if options.yaw else min(4.5, max(abs(v) for v in env.cfg["yaw_command"]))
-            yaw_cmd = drive_target(turn, env.cfg["yaw_command"], yaw_cap)
+            yaw_target = drive_target(turn, env.cfg["yaw_command"], yaw_cap)
+            vx_real = lin_vel[0, 0].item()
+            wz_real = ang_vel[0, 2].item()
+            if locomotion:
+                if options.height_sequence:
+                    index = min(int(seconds / options.height_hold), len(height_sequence) - 1)
+                    height_request = height_sequence[index]
+                elif native_drive is not None:
+                    height_request += 0.10 * native_drive.height_axis() * control_dt
+                    height_request = max(env.height_low, min(height_request, env.height_high))
+                if self_righting is not None and self_righting.active and bool(self_righting.enabled[0]):
+                    # Like the firmware RESCUE/GETUP modes: hold zero motion and restart the slopes from
+                    # the low get-up stance so the policy takes over smoothly afterwards.
+                    command_slope.reset(height=env.height_low)
+                    vx_cmd, yaw_cmd, height_cmd = 0.0, 0.0, env.height_low
+                else:
+                    vx_cmd, yaw_cmd, height_cmd = command_slope.calculate(
+                        vx_target,
+                        yaw_target,
+                        control_dt,
+                        vx_real=vx_real,
+                        wz_real=wz_real,
+                        height_target=height_request,
+                    )
+                env.set_commands(vx_cmd, yaw_cmd, height_cmd, slew=False)
+            else:
+                vx_cmd, yaw_cmd = command_slope.calculate(
+                    vx_target, yaw_target, control_dt, vx_real=vx_real, wz_real=wz_real
+                )
+                env.commands[:, 0] = vx_cmd
+                env.commands[:, 1] = yaw_cmd
         else:
             vx_cmd = options.speed if seconds >= 0.5 else 0.0
             yaw_cmd = options.yaw if seconds >= 0.5 else 0.0
-        if locomotion:
-            if options.height_sequence:
-                index = min(int(seconds / options.height_hold), len(height_sequence) - 1)
-                height_request = height_sequence[index]
-            elif native_drive is not None:
-                height_request += 0.10 * native_drive.height_axis() * control_dt
-                height_request = max(env.height_low, min(height_request, env.height_high))
-            env.set_commands(vx_cmd, yaw_cmd, height_request)
-            vx_cmd, yaw_cmd, height_reference = env.commands[0].tolist()
-        else:
-            env.commands[:, 0] = vx_cmd
-            env.commands[:, 1] = yaw_cmd
-        lin_vel, ang_vel, gravity, _ = env._base_state()
+            if locomotion:
+                if options.height_sequence:
+                    index = min(int(seconds / options.height_hold), len(height_sequence) - 1)
+                    height_request = height_sequence[index]
+                env.set_commands(vx_cmd, yaw_cmd, height_request)
+            else:
+                env.commands[:, 0] = vx_cmd
+                env.commands[:, 1] = yaw_cmd
         if policy is not None:
             actions = policy(env.get_observations())
+            if self_righting is not None:
+                actions = self_righting.mask_actions(actions)
         else:
             speed_integral.add_(control_dt * (vx_cmd - lin_vel[:, 0])).clamp_(-0.5, 0.5)
             actions = scripted_actions(env, lin_vel, ang_vel, gravity, speed_integral)
         obs, reward, done, extras = env.step(actions)
+        if self_righting is not None:
+            started, finished = self_righting.update(extras, done)
+            falls += started.sum()
+            if started[0].item():
+                print(f"t={seconds + control_dt:.2f}s fall detected: firmware RESCUE/GETUP engaged", flush=True)
+            if finished[0].item():
+                print(f"t={seconds + control_dt:.2f}s self-righting finished: policy control resumed", flush=True)
+        if command_slope is not None and done[0].item():
+            command_slope.reset(height=height_request if locomotion else None)
         qpos = env.robot.get_qpos()
-        if not (torch.isfinite(qpos).all() & torch.isfinite(reward).all() & torch.isfinite(obs["policy"]).all()):
-            raise RuntimeError(f"Nonfinite simulation state at step {i + 1}")
-        resets += int(done.sum())
+        finite_ok &= torch.isfinite(qpos).all() & torch.isfinite(reward).all() & torch.isfinite(obs["policy"]).all()
+        resets += done.sum()
         if locomotion:
-            falls += int(extras["fallen"].sum())
-            saturated_steps += int(extras["leg_saturated"][0])
-            body_height = extras["body_clearance"][0].item()
-            body_reference = height_reference + env.body_height_offset
-            height_error += abs(body_height - body_reference)
+            if self_righting is None:
+                falls += extras["fallen"].sum()
+            saturated_steps += extras["leg_saturated"][0].long()
+            body_height_t = extras["body_clearance"][0]
+            body_ref_t = env.commands[0, 2] + env.body_height_offset
+            height_error += (body_height_t - body_ref_t).abs()
             posture_max = torch.maximum(posture_max, extras["posture"][0])
             pitch_peak = torch.maximum(pitch_peak, extras["pitch_deg"][0].abs())
         speed_integral.masked_fill_(done, 0.0)
-        wheel_contact_frames += int(extras["wheel_contacts"][0].all())
-        vx = lin_vel[0, 0].item()
+        wheel_contact_frames += extras["wheel_contacts"][0].all().long()
         position = env.robot.get_pos()[0]
+        x_t = position[0]
+        travelled += torch.where(done[0], 0.0, x_t - last_x)
+        last_x = x_t.clone()
         if camera_follow is not None and not native_monitor:
-            x, y = position[:2].tolist()
-            camera_follow.follow_position(x, y)
             if native_drive is not None:
-                # The viewer throttles redraws independently of the 50 Hz control loop.
-                viewer.update()
-        else:
-            x = position[0].item()
-        if not done[0]:
-            travelled += x - last_x
-        last_x = x
-        if options.video is not None and i % control_steps_per_frame == 0:
-            frames.append((qpos[0].cpu().numpy().copy(), seconds + control_dt, vx_cmd, vx))
-        if (i + 1) % round(1.0 / control_dt) == 0 or i + 1 == steps:
-            yaw = (f" wz={ang_vel[0, 2].item():+.2f}rad/s yaw_target={yaw_cmd:+.2f}rad/s"
+                now_render = monotonic()
+                if now_render >= next_render:
+                    next_render = max(now_render, next_render + render_interval)
+                    x_cam, y_cam = position[:2].tolist()
+                    camera_follow.follow_position(x_cam, y_cam)
+                    # Render at viewer_fps (default 30 Hz) independently of the 50 Hz control loop.
+                    viewer.update(force=True)
+            else:
+                x_cam, y_cam = position[:2].tolist()
+                camera_follow.follow_position(x_cam, y_cam)
+        if is_video_step:
+            vx_cmd_val = env.commands[0, 0].item() if locomotion else vx_cmd
+            frames.append((qpos[0].cpu().numpy().copy(), seconds + control_dt, vx_cmd_val, lin_vel[0, 0].item()))
+        window_steps += 1
+        if is_log_step:
+            if not finite_ok.item():
+                raise RuntimeError(f"Nonfinite simulation state at step {i + 1}")
+            now_log = monotonic()
+            rtf = (window_steps * control_dt) / max(now_log - window_wall, 1e-6)
+            window_wall = now_log
+            window_steps = 0
+            x, y_pos, z_pos = position.tolist()
+            vx = lin_vel[0, 0].item()
+            if locomotion:
+                vx_cmd_log, yaw_cmd_log, height_ref_log = env.commands[0].tolist()
+                body_height = body_height_t.item()
+                body_reference = height_ref_log + env.body_height_offset
+            else:
+                vx_cmd_log, yaw_cmd_log = vx_cmd, yaw_cmd
+            yaw = (f" wz={ang_vel[0, 2].item():+.2f}rad/s yaw_target={yaw_cmd_log:+.2f}rad/s"
                    if options.keyboard or options.yaw else "")
             height = (f" body_height={body_height * 100:.1f}cm "
                       f"ref={body_reference * 100:.1f}cm goal={(height_request + env.body_height_offset) * 100:.1f}cm "
                       f"pitch={extras['pitch_deg'][0].item():+.1f}deg"
                       if locomotion else "")
-            lateral = f" y={position[1].item():.3f}m" if options.free_drive else ""
-            print(f"t={seconds + control_dt:.2f}s x={x:+.3f}m{lateral} z={position[2].item():.3f}m "
-                  f"vx={vx:+.3f}m/s target={vx_cmd:+.2f}m/s{yaw}{height} resets={resets}", flush=True)
+            lateral = f" y={y_pos:.3f}m" if options.free_drive else ""
+            chassis_mode = f" mode={self_righting.mode_name()}" if self_righting is not None else ""
+            print(f"t={seconds + control_dt:.2f}s x={x:+.3f}m{lateral} z={z_pos:.3f}m "
+                  f"vx={vx:+.3f}m/s target={vx_cmd_log:+.2f}m/s{yaw}{height} "
+                  f"resets={resets.item()}{chassis_mode} rtf={rtf:.2f}x", flush=True)
         if live_view is not None or native_drive is not None:
             now = monotonic()
-            next_step = max(now, next_step + control_dt)
+            # Allow up to 2 control steps of bounded catch-up so brief render jitter stays 1:1 with wall time.
+            next_step = max(now - 2.0 * control_dt, next_step + control_dt)
             if next_step > now:
                 sleep(next_step - now)
 
-    print(f"Demo: {steps} control steps x {env.num_envs} envs, {resets} resets, "
-          f"env 0 forward displacement {travelled:+.3f} m, both wheels in contact "
-          f"for {wheel_contact_frames}/{steps} steps.")
+    if not finite_ok.item():
+        raise RuntimeError(f"Nonfinite simulation state at step {steps}")
+    print(f"Demo: {steps} control steps x {env.num_envs} envs, {resets.item()} resets, "
+          f"env 0 forward displacement {travelled.item():+.3f} m, both wheels in contact "
+          f"for {wheel_contact_frames.item()}/{steps} steps.")
     if locomotion:
-        print(f"Falls: {falls}; env 0 body-height MAE: {100 * height_error / steps:.2f} cm; "
-              f"leg torque saturation: {100 * saturated_steps / steps:.1f}% of steps")
+        print(f"Falls: {falls.item()}; env 0 body-height MAE: {100 * height_error.item() / steps:.2f} cm; "
+              f"leg torque saturation: {100 * saturated_steps.item() / steps:.1f}% of steps")
         roll, fore_aft, height_gap = posture_max.tolist()
         print(f"Env 0 peaks: |roll| {roll:.2f} deg, |pitch| {pitch_peak.item():.2f} deg, "
               f"left/right fore-aft gap {fore_aft:.2f} cm, "
@@ -475,6 +594,8 @@ def main():
     parser.add_argument("--speed", type=float, help="Demo forward speed in m/s (2.5 for native keyboard, 0.35 otherwise)")
     parser.add_argument("--accel", type=float, help="Keyboard forward acceleration in m/s^2 (default: 1.8 for --keyboard)")
     parser.add_argument("--brake-accel", type=float, help="Keyboard braking/reversal deceleration in m/s^2 (default: 3.0 for --keyboard)")
+    parser.add_argument("--yaw-accel", type=float, help="Keyboard yaw angular acceleration in rad/s^2 (default: 8.0 for --keyboard; firmware MAX_WZ_ACC is 24.0)")
+    parser.add_argument("--yaw-brake-accel", type=float, help="Keyboard yaw braking/reversal deceleration in rad/s^2 (default: same as --yaw-accel)")
     parser.add_argument("--yaw", type=float, default=0.0, help="Demo yaw-rate request in rad/s")
     heights = parser.add_mutually_exclusive_group()
     heights.add_argument("--body-height", type=float, help="Demo base_link clearance above the ground in meters")
@@ -489,6 +610,7 @@ def main():
     parser.add_argument("--terrain-seed", type=int, help="Override the mixed-terrain layout seed")
     parser.add_argument("--forward-limit", type=float, help="Override the training speed range with this symmetric limit")
     parser.add_argument("--viewer", action="store_true", help="Show the live Genesis scene in demo mode")
+    parser.add_argument("--viewer-fps", type=int, help="Native Genesis viewer refresh rate (default: 30 for --keyboard, 60 otherwise)")
     parser.add_argument("--live-port", type=int, help="Serve training or demo on this loopback port")
     parser.add_argument("--live-fps", type=int, help="Live frame rate target (default: 8 for streamed training, 60 otherwise)")
     parser.add_argument("--live-stream", action="store_true", help="Stream training frames to the browser instead of opening Genesis")
@@ -496,6 +618,8 @@ def main():
     parser.add_argument("--keyboard", action="store_true", help="Drive a PPO demo in Genesis, or in the browser with --live-port")
     parser.add_argument("--free-drive", action="store_true",
                         help="Drive across all terrain lanes without a time limit in the native Genesis viewer")
+    parser.add_argument("--fall-reset", action="store_true",
+                        help="Keyboard demo: reset on fall instead of the firmware RESCUE/GETUP self-righting")
     parser.add_argument("--video", type=Path, help="Save a replay of env 0 as an MP4")
     checkpoint_args = parser.add_mutually_exclusive_group()
     checkpoint_args.add_argument("--checkpoint", type=Path, help="Replay a PPO checkpoint in demo mode")
@@ -529,9 +653,23 @@ def main():
             args.accel = 1.8
         if args.brake_accel is None:
             args.brake_accel = 3.0
-    elif args.accel is not None or args.brake_accel is not None:
-        parser.error("--accel and --brake-accel require --keyboard")
-    for name, value in (("--accel", args.accel), ("--brake-accel", args.brake_accel)):
+        if args.yaw_accel is None:
+            args.yaw_accel = 8.0
+        if args.yaw_brake_accel is None:
+            args.yaw_brake_accel = args.yaw_accel
+    elif (
+        args.accel is not None
+        or args.brake_accel is not None
+        or args.yaw_accel is not None
+        or args.yaw_brake_accel is not None
+    ):
+        parser.error("--accel, --brake-accel, --yaw-accel and --yaw-brake-accel require --keyboard")
+    for name, value in (
+        ("--accel", args.accel),
+        ("--brake-accel", args.brake_accel),
+        ("--yaw-accel", args.yaw_accel),
+        ("--yaw-brake-accel", args.yaw_brake_accel),
+    ):
         if value is not None and (not isfinite(value) or value <= 0.0):
             parser.error(f"{name} must be finite and positive")
     if args.keyboard and args.video and args.seconds is None:
@@ -626,6 +764,8 @@ def main():
         parser.error("--live-port must be between 1 and 65535")
     if args.live_fps is not None and (args.live_port is None or not 1 <= args.live_fps <= 60):
         parser.error("--live-fps requires --live-port and must be between 1 and 60")
+    if args.viewer_fps is not None and not 1 <= args.viewer_fps <= 120:
+        parser.error("--viewer-fps must be between 1 and 120")
     if args.live_stream and (args.mode != "train" or args.live_port is None):
         parser.error("--live-stream requires train mode and --live-port")
     ssh_session = any(environ.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
@@ -672,7 +812,7 @@ def main():
             preview_options["preview_lane"] = (args.surface, (args.terrain_variant or 1) - 1)
         env = env_class(args.model, num_envs, viewer=args.viewer or local_training_view,
                         task_config=settings["task"], training_view_fps=training_view_fps, keyboard_view=native_keyboard,
-                        **preview_options)
+                        viewer_fps=args.viewer_fps, **preview_options)
         if body_heights:
             low = env.height_low + env.body_height_offset
             high = env.height_high + env.body_height_offset

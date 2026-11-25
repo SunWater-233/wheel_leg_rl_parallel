@@ -5,6 +5,8 @@ import numpy as np
 from genesis.vis.keybindings import Key
 from genesis.vis.viewer_plugins import EVENT_HANDLED, ViewerPlugin
 
+from tools.command_slope import FIRMWARE_LEG_LENGTH_SLOPE_SPEED, KeyboardCommandSlope
+
 
 class ViewerFollow(ViewerPlugin):
     def __init__(self):
@@ -58,13 +60,56 @@ class ViewerFollow(ViewerPlugin):
 class ViewerDrive(ViewerFollow):
     motion_keys = frozenset((Key.W, Key.S, Key.A, Key.D))
 
-    def __init__(self, *, enable_height=False, enable_reset=False):
+    def __init__(
+        self,
+        *,
+        enable_height=False,
+        enable_reset=False,
+        vx_accel=1.8,
+        vx_decel=3.0,
+        wz_accel=8.0,
+        wz_decel=None,
+        height_slope_speed=FIRMWARE_LEG_LENGTH_SLOPE_SPEED,
+        initial_height=0.20,
+    ):
         super().__init__()
         if enable_height:
             self.motion_keys = self.motion_keys | {Key.Z, Key.X}
         self.pressed = set()
         self.enable_reset = enable_reset
         self.reset_requested = False
+        self.command_slope = KeyboardCommandSlope(
+            vx_accel=vx_accel,
+            vx_decel=vx_decel,
+            wz_accel=wz_accel,
+            wz_decel=wz_decel,
+            height_slope_speed=height_slope_speed,
+            initial_height=initial_height,
+        )
+
+    def reset_slopes(self, *, vx=0.0, wz=0.0, height=None):
+        self.command_slope.reset(vx=vx, wz=wz, height=height)
+
+    def ramped_commands(
+        self,
+        vx_target,
+        wz_target,
+        dt,
+        *,
+        vx_real=0.0,
+        wz_real=0.0,
+        height_target=None,
+        height_real=0.0,
+    ):
+        return self.command_slope.calculate(
+            vx_target,
+            wz_target,
+            dt,
+            vx_real=vx_real,
+            wz_real=wz_real,
+            height_target=height_target,
+            height_real=height_real,
+        )
 
     def on_key_press(self, symbol, modifiers):
         if self.enable_reset and symbol == Key.R:

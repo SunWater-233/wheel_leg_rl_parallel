@@ -46,7 +46,7 @@ class FlatEnv(VecEnv):
             viewer_options=gs.options.ViewerOptions(
                 camera_pos=(1.3, -1.5, 0.8), camera_lookat=(0, 0, self.height_target),
                 res=(800, 600) if keyboard_view else None,
-                refresh_rate=training_view_fps or (24 if keyboard_view else 60),
+                refresh_rate=training_view_fps or 60,
             ),
         )
         material = gs.materials.Rigid(friction=task["friction"])
@@ -87,7 +87,7 @@ class FlatEnv(VecEnv):
 
     def _add_ground(self, material, viewer):
         surface = gs.surfaces.Default(color=(0.45, 0.55, 0.63), roughness=0.95) if viewer else None
-        self.scene.add_entity(gs.morphs.Plane(visualization=viewer), material=material, surface=surface)
+        self.plane_ground = self.scene.add_entity(gs.morphs.Plane(visualization=viewer), material=material, surface=surface)
 
     def terrain_description(self):
         return "平地"
@@ -120,6 +120,9 @@ class FlatEnv(VecEnv):
     @abstractmethod
     def _apply_springs(self):
         """Update spring forces before a physics step."""
+
+    def _apply_external_wrench(self):
+        """Optional external generalized wrench hook before each physics substep."""
 
     def _reset_envs(self, ids):
         self.robot.set_qpos(self.home_qpos[ids], envs_idx=ids, zero_velocity=True)
@@ -200,6 +203,7 @@ class FlatEnv(VecEnv):
             if substep == delay:
                 actions = self._apply_controls(actions)
             self._apply_springs()
+            self._apply_external_wrench()
             self.scene.step(update_visualizer=self.step_visualizer)
 
         self.episode_length_buf += 1

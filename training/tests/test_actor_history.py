@@ -91,6 +91,74 @@ class ActorHistoryTest(unittest.TestCase):
         self.assertEqual([h3[0, i, 0].item() for i in range(4)], [99.0, 99.0, 99.0, 99.0])
         self.assertEqual([h3[1, i, 0].item() for i in range(4)], [30.0, 20.0, 10.0, 10.0])
 
+    def test_get_observations_clones_policy_history_against_in_place_step_mutation(self):
+        class DummyRobot:
+            def get_quat(self):
+                return torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]])
+
+            def get_vel(self):
+                return torch.zeros((2, 3))
+
+            def get_ang(self):
+                return torch.zeros((2, 3))
+
+            def get_pos(self):
+                return torch.tensor([[0.0, 0.0, 0.25], [0.0, 0.0, 0.25]])
+
+            def get_dofs_position(self, dofs):
+                return torch.zeros((2, len(dofs)))
+
+            def get_dofs_velocity(self, dofs):
+                return torch.zeros((2, len(dofs)))
+
+        class DummyJoint:
+            def __init__(self, z):
+                self._z = z
+
+            def get_anchor_pos(self):
+                return torch.tensor([[0.0, 0.0, self._z], [0.0, 0.0, self._z]])
+
+        env = object.__new__(WheelLegLocomotionEnv)
+        env.num_envs = 2
+        env.device = torch.device("cpu")
+        env.robot = DummyRobot()
+        env.world_gravity = torch.tensor([[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]])
+        env.hips = [DummyJoint(0.25), DummyJoint(0.25)]
+        env.wheels = [DummyJoint(0.05), DummyJoint(0.05)]
+        env.pose_table = torch.zeros((2, 17))
+        env.height_low, env.height_high = 0.17, 0.33
+        env.leg_columns = [1, 2, 3, 4]
+        env.leg_dofs = [0, 1, 2, 3]
+        env.action_dofs = [0, 1, 2, 3, 4, 5]
+        env.leg_direction = torch.ones(4)
+        env.action_direction = torch.ones(6)
+        env.commands = torch.tensor([[0.5, 0.0, 0.20], [-0.4, 0.2, 0.24]])
+        env.motion_scales = torch.tensor([1.0, 1.0, 5.0])
+        env.height_rate = torch.zeros(2)
+        env.last_actions = torch.ones((2, 6)) * 0.25
+        env.critic_scan_offsets = None
+        env.observation_noise = None
+        env.actor_true_forward_speed = False
+        env.actor_history_steps = 5
+        env.policy_obs_dim = 28
+        env.policy_history = torch.zeros((2, 4, 28))
+        env.last_policy_obs = torch.zeros((2, 28))
+        env.history_needs_fill = torch.ones(2, dtype=torch.bool)
+
+        obs0 = env.get_observations()
+        saved_hist0 = obs0["policy_history"].clone()
+        self.assertNotEqual(obs0["policy_history"].data_ptr(), env.policy_history.data_ptr())
+
+        # Simulate env.step() shifting policy_history and resetting env 0 before RolloutStorage copies obs0.
+        env.commands[:, 0] = 1.2
+        obs1_pre = env.get_observations()
+        env.policy_history[:, 1:] = env.policy_history[:, :-1].clone()
+        env.policy_history[:, 0] = env.last_policy_obs
+        env.policy_history[0] = -999.0
+
+        torch.testing.assert_close(obs0["policy_history"], saved_hist0)
+        self.assertNotEqual(obs1_pre["policy_history"].data_ptr(), env.policy_history.data_ptr())
+
     def test_history_config_validation_and_toml(self):
         cfg = load_config(TRAINING_DIR / "configs/v02_history5_complex_finetune.toml")
         self.assertEqual(cfg["task"]["locomotion"]["actor_history_steps"], 5)

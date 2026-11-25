@@ -73,6 +73,7 @@ class ViewerDrive(ViewerFollow):
             return EVENT_HANDLED
         if symbol == Key.SPACE:
             self.pressed.clear()
+            self.pressed.add(Key.SPACE)
             return EVENT_HANDLED
         if symbol in self.motion_keys:
             self.pressed.add(symbol)
@@ -88,6 +89,8 @@ class ViewerDrive(ViewerFollow):
 
     def motion_axes(self):
         keys = self.pressed.copy()
+        if Key.SPACE in keys:
+            return 0, 0
         return (Key.W in keys) - (Key.S in keys), (Key.A in keys) - (Key.D in keys)
 
     def height_axis(self):

@@ -1,0 +1,215 @@
+# Stage 2 (SCUT rough_rotation_stair + Rough-v1 full alignment):
+# Initialize via --init-checkpoint from Stage 1 flat_speed (model_1800.pt).
+# Aligns all 10 SCUT rough-terrain mechanisms:
+#   1) Per-terrain command manager (full-speed slopes/rough/bumps, steering, mid-obstacle stops & slope rotation)
+#   2) Per-terrain safe leg-height ranges ([0.18, 0.30] / [0.18, 0.27], eliminating 25% 0.17m bottom-out clamping)
+#   3) Per-env adaptive terrain difficulty curriculum (0 -> 1 -> 2 + max-level full-range rehearsal)
+#   4) Mid-episode push_robot, continuous external wrenches, tilted/velocity resets & airborne drop braking
+#   5) Expanded spring force & PD gain domain randomization + wider contact friction [0.45..1.20]
+#   6) vel_height_gate_flat_only = true (full tracking gradient on rough terrain, anti-bobbing on flat)
+#   7) Decoupled yaw_error_scale (0.50 on straight/terrain for zero yaw drift, 0.18 only during >4.5 rad/s spin)
+#   8) Compliant SCUT vertical/attitude weights (vertical_vel=0.5, height=1.0/10.0, ground_pitch_error=0.0)
+#   9) Step-command-safe BrakingPitchCost + 60/40 step-vs-slew command mix for keyboard & transition braking
+#  10) Uncapped PPO exploration (init_checkpoint_min_std=0.28, entropy_coef=0.004)
+[task]
+episode_seconds = 32.0
+use_cad_base_hull = true
+forward_command = [-2.5, 2.5]
+yaw_command = [-10.0, 10.0]
+
+[task.observation_noise]
+gyro = 0.05
+gravity = 0.02
+joint_position = 0.01
+joint_velocity = 0.5
+
+[task.locomotion]
+enabled = true
+critic_terrain_observations = true
+actor_history_steps = 5
+leg_torque_limit = 40.0
+wheel_torque_limit = 5.0
+wheel_target_delay_steps = 5
+height_range = [0.17, 0.33]
+obstacle_height_range = [0.18, 0.30]
+hard_obstacle_height_range = [0.18, 0.27]
+height_max_probability = 0.12
+height_rate = 0.35
+height_acceleration = 1.20
+command_seconds = [2.5, 5.5]
+command_acceleration_levels = [0.80, 1.80, 3.00, 4.00]
+command_acceleration_weights = [0.20, 0.35, 0.30, 0.15]
+direct_velocity_commands = true
+direct_velocity_probability = 0.60
+manual_forward_acceleration = 1.8
+terrain = "scut_ground"
+terrain_traversal = true
+terrain_forward_limit = 0.0
+terrain_seed = 733
+scut_ground_scale = 1.00
+scut_ground_bars_fraction = 0.20
+scut_ground_bars_reverse_probability = 0.50
+scut_ground_compound_fraction = 0.12
+scut_ground_single_side_fraction = 0.08
+scut_ground_speed_bump_fraction = 0.06
+scut_ground_speed_bump_height = [0.025, 0.05]
+scut_ground_speed_bump_length = 0.30
+scut_ground_rough_slope_low_height_probability = 0.35
+
+[task.locomotion.heading_hold]
+enabled = true
+
+[task.locomotion.low_recovery]
+flat_episode_fraction = 0.05
+
+[task.locomotion.special_mode_commands]
+enabled = true
+rel_standing_envs = 0.12
+rel_zero_yaw_envs = 0.25
+resampling_time_range = [2.5, 6.0]
+min_episode_time = 2.0
+require_stable = true
+stable_gravity_xy_max = 0.35
+stable_lin_vel_max = 3.0
+stable_ang_vel_max = 10.0
+normal_forward_range = [-2.5, 2.5]
+normal_yaw_range = [-4.5, 4.5]
+
+[[task.locomotion.special_mode_commands.modes]]
+name = "dash"
+rel_envs = 0.30
+iteration_start = 0
+iteration_end = -1
+lin_vel_x = [[-2.5, -1.8], [1.8, 2.5]]
+ang_vel_z = [[-4.5, 4.5]]
+
+[[task.locomotion.special_mode_commands.modes]]
+name = "spin_low"
+rel_envs = 0.15
+iteration_start = 0
+iteration_end = -1
+lin_vel_x = [[-0.1, 0.1]]
+ang_vel_z = [[-7.0, -4.5], [4.5, 7.0]]
+
+[[task.locomotion.special_mode_commands.modes]]
+name = "spin_mid"
+rel_envs = 0.15
+iteration_start = 0
+iteration_end = -1
+lin_vel_x = [[-0.1, 0.1]]
+ang_vel_z = [[-10.0, -7.0], [7.0, 10.0]]
+
+[task.locomotion.terrain_commands]
+enabled = true
+fast_forward_range = [0.45, 2.35]
+hard_forward_range = [0.45, 1.65]
+fast_yaw_max = 2.2
+hard_yaw_max = 1.0
+zero_yaw_probability = 0.55
+stop_probability = 0.16
+spin_probability = 0.08
+spin_yaw_range = [3.0, 6.5]
+resampling_time_range = [1.3, 2.8]
+engage_x = 3.3
+
+[task.locomotion.terrain_curriculum]
+enabled = true
+promote_distance = 5.8
+demote_distance = 4.2
+max_level_weights = [0.20, 0.35, 0.45]
+
+[task.locomotion.events]
+enabled = true
+push_interval_seconds = [5.0, 9.0]
+push_vel_xy = 0.28
+push_ang_vel_xy = 0.45
+wrench_interval_seconds = [4.0, 8.0]
+external_force_xyz = [10.0, 10.0, 6.0]
+external_torque_xyz = [1.2, 1.2, 0.8]
+wrench_zero_probability = 0.35
+reset_roll_pitch_rad = 0.12
+reset_yaw_rad = 0.20
+reset_joint_pos_rad = 0.05
+reset_lin_vel = 0.25
+reset_ang_vel = 0.35
+air_drop_flat_fraction = 0.10
+air_drop_height_range = [0.07, 0.22]
+air_drop_speed_max = 1.8
+air_drop_brake_probability = 0.55
+
+[task.domain_randomization]
+enabled = true
+nominal_probability = 0.25
+contact_friction = [0.45, 0.60, 0.75, 0.90, 1.05, 1.20]
+body_mass_scale = [0.90, 1.18]
+spring_force_scale = [0.85, 1.15]
+leg_kp_scale = [0.85, 1.15]
+leg_kv_scale = [0.85, 1.15]
+wheel_kv_scale = [0.85, 1.15]
+
+[task.scut_rough_reward.tracking]
+forward_deadband = 0.04
+yaw_deadband = 0.05
+forward_reward_weight = 2.5
+forward_error_width = 0.25
+forward_error_clip = 2.0
+forward_error_scale = 0.55
+vel_height_gate_enabled = true
+vel_height_gate_flat_only = true
+vel_height_gate_full_error = 0.04
+vel_height_gate_zero_error = 0.09
+yaw_reward_weight = 1.6
+yaw_error_width = 0.35
+yaw_error_clip = 2.5
+yaw_error_scale = 0.50
+spin_yaw_threshold = 4.5
+spin_yaw_error_scale = 0.18
+pitch_penalty_weight = 2.0
+pitch_width = 0.02
+ground_pitch_error_weight = 0.0
+ground_pitch_rate_weight = 0.0
+roll_penalty_weight = 2.2
+roll_width = 0.01
+flat_roll_error_weight = 0.45
+flat_roll_rate_weight = 0.08
+height_reward_weight = 1.0
+height_error_width = 0.0012
+height_error_scale = 10.0
+
+[task.scut_rough_reward.motion]
+action_delta_weight = 0.003
+leg_action_curvature_weight = 0.006
+wheel_action_curvature_weight = 0.0015
+leg_velocity_weight = 0.0015
+wheel_gap_threshold_weight = 1.1
+wheel_gap_scale = 5.0
+
+[task.scut_rough_reward.regularization]
+vertical_velocity_weight = 0.50
+body_angular_velocity_weight = 0.06
+
+[task.scut_rough_reward.braking]
+enabled = true
+preserve_across_airborne = true
+recovery_seconds = 0.85
+recovery_speed_weight = 0.55
+
+[ppo]
+save_interval = 100
+max_action_std = 0.0
+init_checkpoint_min_std = 0.28
+
+[ppo.policy]
+actor_hidden_dims = [256, 128, 64]
+critic_hidden_dims = [256, 128, 64]
+activation = "elu"
+init_noise_std = 0.8
+
+[ppo.algorithm]
+learning_rate = 0.0001
+schedule = "adaptive"
+desired_kl = 0.01
+num_learning_epochs = 5
+num_mini_batches = 4
+clip_param = 0.2
+entropy_coef = 0.004

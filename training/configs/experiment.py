@@ -1,9 +1,11 @@
 """Load experiment settings and record each training run."""
 
+from collections.abc import Sequence
 from copy import deepcopy
 from hashlib import sha256
 import json
 from math import isfinite
+from numbers import Real
 from pathlib import Path
 import tomllib
 
@@ -42,6 +44,46 @@ def _validate_range(settings, name):
     return limits
 
 
+def normalize_range_spec(value, *, name="range", limit=None):
+    """Normalize a [low, high] pair or list of [low, high] pairs into sorted, merged tuples."""
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise ValueError(f"{name} must be a [low, high] pair or a list of [low, high] pairs")
+    items = list(value)
+    if not items:
+        raise ValueError(f"{name} cannot be empty")
+    if len(items) == 2 and all(isinstance(v, Real) and not isinstance(v, bool) for v in items):
+        raw_ranges = [(float(items[0]), float(items[1]))]
+    else:
+        raw_ranges = []
+        for entry in items:
+            if not isinstance(entry, Sequence) or isinstance(entry, (str, bytes)) or len(entry) != 2:
+                raise ValueError(f"Invalid range entry in {name}: {entry!r}")
+            low, high = entry
+            if (not isinstance(low, Real) or isinstance(low, bool)
+                    or not isinstance(high, Real) or isinstance(high, bool)):
+                raise ValueError(f"Invalid range bounds in {name}: {entry!r}")
+            raw_ranges.append((float(low), float(high)))
+
+    normalized = []
+    for low, high in raw_ranges:
+        if not (isfinite(low) and isfinite(high)):
+            raise ValueError(f"{name} bounds must be finite")
+        if low > high:
+            raise ValueError(f"{name} bounds must be in ascending order: [{low}, {high}]")
+        if limit is not None and (low < -limit or high > limit):
+            raise ValueError(f"{name} bounds [{low}, {high}] exceed ±{limit:g}")
+        normalized.append((low, high))
+
+    normalized.sort(key=lambda pair: pair[0])
+    merged = []
+    for low, high in normalized:
+        if not merged or low > merged[-1][1] + 1e-6:
+            merged.append([low, high])
+        else:
+            merged[-1][1] = max(merged[-1][1], high)
+    return tuple((pair[0], pair[1]) for pair in merged)
+
+
 def _validate_scut_reward(reward):
     divisors = {
         "tracking": {"forward_error_width", "yaw_error_width", "pitch_width", "roll_width",
@@ -57,6 +99,10 @@ def _validate_scut_reward(reward):
                 raise ValueError(f"{path} must be finite and nonnegative")
             if value == 0 and name in divisors.get(section, ()):
                 raise ValueError(f"{path} must be positive")
+    tracking = reward["tracking"]
+    if tracking["vel_height_gate_zero_error"] < tracking["vel_height_gate_full_error"]:
+        raise ValueError("task.scut_rough_reward.tracking.vel_height_gate_zero_error must be at least "
+                         "vel_height_gate_full_error")
     airborne = reward["airborne"]
     if airborne["knee_margin_fraction"] > 0.5:
         raise ValueError("task.scut_rough_reward.airborne.knee_margin_fraction must be at most 0.5")
@@ -141,6 +187,12 @@ def _validate_settings(settings):
     low, high = locomotion["height_range"]
     if not HEIGHT_LIMITS[0] <= low <= locomotion["height_nominal"] <= high <= HEIGHT_LIMITS[1]:
         raise ValueError("height_range and height_nominal must fit the 0.17–0.33 m chassis range")
+    for subrange_name in ("obstacle_height_range", "hard_obstacle_height_range"):
+        subrange = locomotion[subrange_name]
+        if subrange:
+            sub_low, sub_high = _validate_range(locomotion, subrange_name)
+            if not low <= sub_low <= sub_high <= high:
+                raise ValueError(f"{subrange_name} must fit within height_range [{low:g}, {high:g}]")
     schedule = locomotion["height_lowering_schedule"]
     if schedule:
         if not locomotion["enabled"] or any(
@@ -269,10 +321,127 @@ def _validate_settings(settings):
             if not -limit <= low <= 0 <= high <= limit:
                 raise ValueError(f"{name} must include zero and fit ±{limit:g}")
 
+    if locomotion["direct_velocity_commands"] and not locomotion["enabled"]:
+        raise ValueError("direct_velocity_commands requires enabled locomotion")
+    direct_prob = locomotion["direct_velocity_probability"]
+    if not isfinite(direct_prob) or not 0.0 <= direct_prob <= 1.0:
+        raise ValueError("direct_velocity_probability must be in [0, 1]")
+
+    terrain_cmds = locomotion["terrain_commands"]
+    if terrain_cmds["enabled"]:
+        if not (locomotion["enabled"] and locomotion["terrain_traversal"]):
+            raise ValueError("terrain_commands requires enabled terrain_traversal")
+        for rname in ("fast_forward_range", "hard_forward_range"):
+            rlow, rhigh = _validate_range(terrain_cmds, rname)
+            if not 0.0 < rlow <= rhigh <= MAX_FORWARD_SPEED:
+                raise ValueError(f"terrain_commands.{rname} must be in (0, {MAX_FORWARD_SPEED:g}]")
+        for yname in ("fast_yaw_max", "hard_yaw_max"):
+            ymax = terrain_cmds[yname]
+            if not isfinite(ymax) or not 0.0 <= ymax <= YAW_REFERENCE:
+                raise ValueError(f"terrain_commands.{yname} must be in [0, {YAW_REFERENCE:g}]")
+        for pname in ("zero_yaw_probability", "stop_probability", "spin_probability"):
+            pval = terrain_cmds[pname]
+            if not isfinite(pval) or not 0.0 <= pval <= 1.0:
+                raise ValueError(f"terrain_commands.{pname} must be in [0, 1]")
+        if terrain_cmds["stop_probability"] + terrain_cmds["spin_probability"] > 0.90:
+            raise ValueError("terrain_commands stop_probability + spin_probability must leave room for traversal")
+        spin_low, spin_high = _validate_range(terrain_cmds, "spin_yaw_range")
+        if not 0.0 <= spin_low <= spin_high <= YAW_REFERENCE:
+            raise ValueError(f"terrain_commands.spin_yaw_range must fit [0, {YAW_REFERENCE:g}]")
+        if _validate_range(terrain_cmds, "resampling_time_range")[0] <= 0.0:
+            raise ValueError("terrain_commands.resampling_time_range must be positive")
+        if not isfinite(terrain_cmds["engage_x"]) or terrain_cmds["engage_x"] <= 0.0:
+            raise ValueError("terrain_commands.engage_x must be positive")
+
+    curriculum = locomotion["terrain_curriculum"]
+    if curriculum["enabled"]:
+        if not (locomotion["enabled"] and locomotion["terrain_traversal"]):
+            raise ValueError("terrain_curriculum requires enabled terrain_traversal")
+        if (not isfinite(curriculum["promote_distance"]) or not isfinite(curriculum["demote_distance"])
+                or not 0.0 < curriculum["demote_distance"] <= curriculum["promote_distance"]):
+            raise ValueError("terrain_curriculum requires 0 < demote_distance <= promote_distance")
+        mweights = curriculum["max_level_weights"]
+        if len(mweights) != 3 or any(type(w) not in (int, float) or not isfinite(w) or w < 0 for w in mweights) or not any(mweights):
+            raise ValueError("terrain_curriculum.max_level_weights requires 3 nonnegative weights with positive sum")
+
+    events = locomotion["events"]
+    if events["enabled"]:
+        if not locomotion["enabled"]:
+            raise ValueError("events requires enabled locomotion")
+        if _validate_range(events, "push_interval_seconds")[0] <= 0.0:
+            raise ValueError("events.push_interval_seconds must be positive")
+        if _validate_range(events, "wrench_interval_seconds")[0] <= 0.0:
+            raise ValueError("events.wrench_interval_seconds must be positive")
+        for nonneg in ("push_vel_xy", "push_ang_vel_xy", "reset_roll_pitch_rad", "reset_yaw_rad",
+                       "reset_joint_pos_rad", "reset_lin_vel", "reset_ang_vel", "air_drop_speed_max"):
+            if not isfinite(events[nonneg]) or events[nonneg] < 0.0:
+                raise ValueError(f"events.{nonneg} must be finite and nonnegative")
+        for vec_name in ("external_force_xyz", "external_torque_xyz"):
+            vec = events[vec_name]
+            if len(vec) != 3 or any(type(v) not in (int, float) or not isfinite(v) or v < 0 for v in vec):
+                raise ValueError(f"events.{vec_name} must contain 3 nonnegative finite values")
+        for prob_name in ("wrench_zero_probability", "air_drop_flat_fraction", "air_drop_brake_probability"):
+            if not isfinite(events[prob_name]) or not 0.0 <= events[prob_name] <= 1.0:
+                raise ValueError(f"events.{prob_name} must be in [0, 1]")
+        drop_low, drop_high = _validate_range(events, "air_drop_height_range")
+        if drop_low < 0.0 or drop_high > 0.45:
+            raise ValueError("events.air_drop_height_range must be within [0, 0.45] m")
+    special = locomotion["special_mode_commands"]
+    if special["enabled"]:
+        if not locomotion["enabled"]:
+            raise ValueError("special_mode_commands requires enabled locomotion")
+        if locomotion["speed_maneuvers"]:
+            raise ValueError("special_mode_commands cannot be combined with speed_maneuvers")
+        for prob_name in ("rel_standing_envs", "rel_zero_yaw_envs"):
+            prob = special[prob_name]
+            if not isfinite(prob) or not 0.0 <= prob <= 1.0:
+                raise ValueError(f"task.locomotion.special_mode_commands.{prob_name} must be in [0, 1]")
+        resample_low, resample_high = _validate_range(special, "resampling_time_range")
+        if resample_low <= 0.0:
+            raise ValueError("task.locomotion.special_mode_commands.resampling_time_range must be positive")
+        for nonneg_name in ("min_episode_time", "stable_gravity_xy_max", "stable_lin_vel_max", "stable_ang_vel_max"):
+            val = special[nonneg_name]
+            if not isfinite(val) or val < 0.0:
+                raise ValueError(f"task.locomotion.special_mode_commands.{nonneg_name} must be finite and nonnegative")
+        if special["normal_forward_range"]:
+            normalize_range_spec(
+                special["normal_forward_range"],
+                name="task.locomotion.special_mode_commands.normal_forward_range",
+                limit=MAX_FORWARD_SPEED,
+            )
+        if special["normal_yaw_range"]:
+            normalize_range_spec(
+                special["normal_yaw_range"],
+                name="task.locomotion.special_mode_commands.normal_yaw_range",
+                limit=YAW_REFERENCE,
+            )
+        allowed_mode_keys = {"name", "rel_envs", "iteration_start", "iteration_end", "lin_vel_x", "ang_vel_z"}
+        for idx, mode in enumerate(special["modes"]):
+            prefix = f"task.locomotion.special_mode_commands.modes[{idx}]"
+            if not isinstance(mode, dict):
+                raise ValueError(f"{prefix} must be a table")
+            unknown = set(mode) - allowed_mode_keys
+            if unknown:
+                raise ValueError(f"Unknown keys in {prefix}: {sorted(unknown)}")
+            for required in ("rel_envs", "lin_vel_x", "ang_vel_z"):
+                if required not in mode:
+                    raise ValueError(f"{prefix} requires {required}")
+            rel = mode["rel_envs"]
+            if not isinstance(rel, Real) or isinstance(rel, bool) or not isfinite(rel) or not 0.0 <= rel <= 1.0:
+                raise ValueError(f"{prefix}.rel_envs must be in [0, 1]")
+            start = mode.get("iteration_start", 0)
+            end = mode.get("iteration_end", -1)
+            if type(start) is not int or start < 0:
+                raise ValueError(f"{prefix}.iteration_start must be a nonnegative integer")
+            if type(end) is not int or (end >= 0 and end <= start):
+                raise ValueError(f"{prefix}.iteration_end must be -1 or an integer greater than iteration_start")
+            normalize_range_spec(mode["lin_vel_x"], name=f"{prefix}.lin_vel_x", limit=MAX_FORWARD_SPEED)
+            normalize_range_spec(mode["ang_vel_z"], name=f"{prefix}.ang_vel_z", limit=YAW_REFERENCE)
+
     randomization = task["domain_randomization"]
     if randomization["enabled"]:
-        if not locomotion["enabled"] or not has_terrain or not 0.01 <= task["friction"] <= 5.0:
-            raise ValueError("Domain randomization requires terrain locomotion and friction in [0.01, 5.0]")
+        if not locomotion["enabled"] or not 0.01 <= task["friction"] <= 5.0:
+            raise ValueError("Domain randomization requires locomotion and friction in [0.01, 5.0]")
         if not 0 <= randomization["nominal_probability"] <= 1:
             raise ValueError("nominal_probability must be in [0, 1]")
         friction = randomization["contact_friction"]
@@ -280,6 +449,9 @@ def _validate_settings(settings):
             raise ValueError("contact_friction must contain values in [0.01, 5.0]")
         if _validate_range(randomization, "body_mass_scale")[0] <= 0:
             raise ValueError("body_mass_scale must be positive")
+        for scale_name in ("spring_force_scale", "leg_kp_scale", "leg_kv_scale", "wheel_kv_scale"):
+            if _validate_range(randomization, scale_name)[0] <= 0:
+                raise ValueError(f"{scale_name} must be positive")
         offsets = randomization["load_offsets"]
         if not offsets or any(not isinstance(offset, list) or len(offset) != 3 or
                               any(type(v) not in (int, float) or not isfinite(v) for v in offset)
@@ -296,6 +468,9 @@ def _validate_settings(settings):
     max_action_std = ppo["max_action_std"]
     if not isfinite(max_action_std) or (max_action_std != 0.0 and max_action_std < 1e-6):
         raise ValueError("ppo.max_action_std must be zero or a finite value of at least 1e-6")
+    init_min_std = ppo["init_checkpoint_min_std"]
+    if not isfinite(init_min_std) or init_min_std < 0.0:
+        raise ValueError("ppo.init_checkpoint_min_std must be finite and nonnegative")
     for name in ("num_learning_epochs", "num_mini_batches"):
         if ppo["algorithm"][name] <= 0:
             raise ValueError(f"ppo.algorithm.{name} must be positive")
@@ -335,6 +510,7 @@ def runner_config(ppo, *, actor_true_forward_speed=False, actor_history_steps=1)
     # RSL-RL removes class names and alters the configuration it receives.
     config = deepcopy(ppo)
     config.pop("max_action_std", None)
+    config.pop("init_checkpoint_min_std", None)
     config["obs_groups"] = {"policy": ["policy"], "critic": ["critic"]}
     if actor_true_forward_speed:
         config["obs_groups"]["policy"].append("body_forward_speed")

@@ -21,10 +21,16 @@ forward_error_clip = 1.0     # 计算指数奖励时，纵向速度误差的绝�
 forward_error_width = 0.5    # 纵向速度跟踪的指数奖励宽度
 forward_error_scale = 0.25   # 纵向速度误差先乘此值再平方扣分
 forward_upright_pitch_scale = 0.30 # 纵向速度指数奖励的俯仰直立门控尺度（按重力前向分量计，填 0 时关闭）
+vel_height_gate_enabled = false    # 速度/转向跟踪奖励的高度误差门控（防为了追速/旋转牺牲腿高“坐船”）
+vel_height_gate_flat_only = false  # 仅在平地接地时启用速度高度门控，复杂地形放开满额跟踪梯度（对齐华南虎二阶段）
+vel_height_gate_full_error = 0.05  # 高度绝对误差不大于此值时门控为 1，单位为米
+vel_height_gate_zero_error = 0.10  # 高度绝对误差不小于此值时门控降为 0，中间线性衰减，单位为米
 yaw_reward_weight = 1.0      # 转向角速度跟踪的指数奖励权重
 yaw_error_clip = 0.8         # 计算指数奖励时，转向角速度误差的绝对值最多按此值计，单位为弧度/秒
 yaw_error_width = 0.25       # 转向角速度跟踪的指数奖励宽度
 yaw_error_scale = 0.5        # 转向角速度误差先乘此值再平方扣分
+spin_yaw_threshold = 0.0     # 大于 0 时，转向指令绝对值超过此阈值的陀螺模式改用 spin_yaw_error_scale，单位为弧度/秒
+spin_yaw_error_scale = 0.18  # 高速小陀螺模式下的转向误差平方扣分尺度
 standing_drift_weight = 1.0  # 纵向速度指令按零速跟踪时，惩罚车身在水平面上漂移
 pitch_reward_weight = 1.0    # 车身少点头或仰头时得到的指数奖励权重
 pitch_width = 0.02           # 俯仰指数奖励的宽度，以车身坐标系中的重力前后分量衡量
@@ -125,6 +131,10 @@ enabled = false # 是否启用物理参数随机化
 nominal_probability = 0.25 # 启用随机化后，仍使用标称物理参数的环境比例
 contact_friction = [0.50, 0.65, 0.80, 0.95] # 随机抽取的接触摩擦系数档位
 body_mass_scale = [0.95, 1.10] # 车身质量相对标称值的倍率范围
+spring_force_scale = [1.0, 1.0] # 气弹簧标称推力的倍率范围
+leg_kp_scale = [1.0, 1.0]       # 主动腿关节位置刚度 Kp 的倍率范围
+leg_kv_scale = [1.0, 1.0]       # 主动腿关节速度阻尼 Kv 的倍率范围
+wheel_kv_scale = [1.0, 1.0]     # 驱动轮速度伺服增益 Kv 的倍率范围
 load_offsets = [
     [
         -0.12,
@@ -182,6 +192,8 @@ leg_torque_limit = 12.0           # 单个主动腿关节的力矩上限，单�
 wheel_torque_limit = 5.0          # 单侧轮端伺服的力矩上限，单位为牛·米
 wheel_target_delay_steps = 0      # 轮速目标延迟，按 2 ms 物理步计，最大 9 步
 height_range = [0.17, 0.20]       # 腿高指令范围，按髋关节到轮心的竖直距离计算，单位为米
+obstacle_height_range = []        # 非平地障碍赛道的腿高采样范围，留空时复用 height_range
+hard_obstacle_height_range = []   # 高难凸条与台阶赛道的腿高采样范围，留空时复用 obstacle_height_range
 height_lowering_schedule = []     # 逐步降低腿高采样下限，每项为 [PPO 迭代轮数, 最低腿高（米）]
 height_nominal = 0.20             # 标称腿高，用于初始化和目标采样，单位为米
 height_max_probability = 0.0      # 直接抽到腿高上限的概率
@@ -202,6 +214,8 @@ speed_maneuver_weights = []
 command_speed_levels = []         # 每个回合抽取的纵向速度上限档位，单位为米/秒
 command_acceleration_levels = []  # 每个回合抽取的纵向加减速度上限档位，单位为米/秒²
 command_acceleration_weights = [] # 加减速度档位的抽样权重，留空时等概率抽取
+direct_velocity_commands = false  # 训练时直接阶跃切到目标速度/转向指令，去掉慢速加速度斜坡（华南虎/复旦思路）
+direct_velocity_probability = 1.0 # 启用阶跃指令时，按回合抽取纯阶跃指令的比例（其余回合走斜坡加减速以兼容键盘/过渡刹停）
 manual_forward_acceleration = 4.0 # 回放的纵向加减速度上限，单位为米/秒²
 cliff_approach_speed = 0.0        # 下台阶落地前的接近速度上限，单位为米/秒，填 0 时不启用
 terrain = "plane"                 # plane 为平地，mixed 为混合地形，scut_v1 为跑场，scut_ground 为贴地跑场
@@ -238,11 +252,68 @@ flat_episode_fraction = 0.0 # 平地回合中从低位落地并恢复的比例
 unpowered_seconds = 0.20    # 关闭主动腿轮驱动的落地时间
 deadline_seconds = 1.50     # 从复位到站稳的时间上限
 
+# 华南虎风格 SpecialModeUniformVelocityCommand：按训练轮次门控的多模式阶跃速度采样器。
+[task.locomotion.special_mode_commands]
+enabled = false                     # 是否启用多模式速度指令采样（与 speed_maneuvers 互斥）
+rel_standing_envs = 0.10            # 每次重采样进入零速站立的比例（最高优先级）
+rel_zero_yaw_envs = 0.25            # 普通环境重采样时将转向角速度置零的比例（用于训练直行锁航向）
+resampling_time_range = [3.0, 7.0]  # 指令重采样周期范围，单位为秒
+min_episode_time = 2.0              # 回合开始后至少经过此时长才允许进入特殊模式，单位为秒
+require_stable = false              # 进入特殊模式前是否要求机身处于直立稳定状态
+stable_gravity_xy_max = 0.35        # 稳定判定的水平重力投影范数上限
+stable_lin_vel_max = 3.0            # 稳定判定的机身线速度分量绝对值上限，m/s
+stable_ang_vel_max = 10.0           # 稳定判定的机身角速度分量绝对值上限，rad/s
+normal_forward_range = []           # 普通环境的纵向速度采样区间，留空时复用 task.forward_command
+normal_yaw_range = []               # 普通环境的转向角速度采样区间，留空时复用 task.yaw_command
+modes = []                          # 特殊模式数组表：每项含 name, rel_envs, iteration_start, iteration_end, lin_vel_x, ang_vel_z
+
+# 华南虎风格分地形指令采样（TerrainCommandManager）：允许在坡道/粗糙路/凸条/台阶上覆盖全速、转向、刹停与旋转。
+[task.locomotion.terrain_commands]
+enabled = false
+fast_forward_range = [0.45, 2.35]   # 坡道、凹坡、粗糙路、错位凸条、减速带等赛道的巡航速度绝对值范围 (m/s)
+hard_forward_range = [0.45, 1.65]   # 6cm 横条、单侧凸条、台阶等高难赛道的巡航速度绝对值范围 (m/s)
+fast_yaw_max = 2.2                  # 快速障碍赛道的转向角速度上限 (rad/s)
+hard_yaw_max = 1.0                  # 高难障碍赛道的转向角速度上限 (rad/s)
+zero_yaw_probability = 0.55         # 障碍内保持零转向指令并开启航向锁定的比例
+stop_probability = 0.16             # 障碍区内中途刹停到零速并保持的比例
+spin_probability = 0.08             # 坡道/粗糙路障碍区内进入原地旋转的比例
+spin_yaw_range = [3.0, 6.5]         # 地形原地旋转的角速度绝对值范围 (rad/s)
+resampling_time_range = [1.3, 2.8]  # 障碍区指令重采样周期范围 (s)
+engage_x = 3.3                      # 进入 |x| <= engage_x 障碍核心区前保持直行助跑 (m)
+
+# 华南虎风格按环境自适应地形难度课程（0 -> 1 -> 2 逐级晋升，满级后按权重全档位混采防遗忘）。
+[task.locomotion.terrain_curriculum]
+enabled = false
+promote_distance = 5.8              # 距出生点行进超过此距离且未摔倒时晋升下一难度档位 (m)
+demote_distance = 4.2               # 摔倒且行进不足此距离时降回上一难度档位 (m)
+max_level_weights = [0.20, 0.35, 0.45] # 通关最高档后在 0/1/2 三档间的随机采样权重
+
+# 华南虎风格外部扰动与复位状态随机化（push_robot + 持续外力矩 + 倾斜偏航初态 + 空中下落刹停）。
+[task.locomotion.events]
+enabled = false
+push_interval_seconds = [5.0, 9.0]  # 回合中途随机速度冲击的时间间隔范围 (s)
+push_vel_xy = 0.28                  # 水平线速度冲击幅值上限 (m/s)
+push_ang_vel_xy = 0.45              # 横滚/俯仰角速度冲击幅值上限 (rad/s)
+wrench_interval_seconds = [4.0, 8.0] # 持续外力/外力矩重采样周期范围 (s)
+external_force_xyz = [10.0, 10.0, 6.0] # 机身三维持续外力幅值上限 (N)
+external_torque_xyz = [1.2, 1.2, 0.8]  # 机身三维持续外力矩幅值上限 (N·m)
+wrench_zero_probability = 0.35      # 持续外力窗口中保持零外力的比例
+reset_roll_pitch_rad = 0.12         # 复位时初始横滚/俯仰角随机扰动上限 (rad)
+reset_yaw_rad = 0.20                # 复位时初始偏航角随机扰动上限 (rad)
+reset_joint_pos_rad = 0.05          # 复位时主动腿关节角度随机扰动上限 (rad)
+reset_lin_vel = 0.25                # 复位时初始机身线速度扰动上限 (m/s)
+reset_ang_vel = 0.35                # 复位时初始机身角速度扰动上限 (rad/s)
+air_drop_flat_fraction = 0.0        # 平地回合中模拟下台阶腾空带速落地的比例（对齐华南虎 predefined_reset_air）
+air_drop_height_range = [0.07, 0.22] # 腾空复位相对站姿的额外离地高度范围 (m)
+air_drop_speed_max = 1.8            # 腾空复位初始纵向速度上限 (m/s)
+air_drop_brake_probability = 0.55   # 腾空复位后立即请求刹停到零速的比例
+
 # PPO 每轮的采样和保存设置。
 [ppo]
 num_steps_per_env = 24 # 每轮更新前，每个环境采集的仿真步数
 save_interval = 500    # 每隔多少轮保存一次模型检查点
 max_action_std = 0.0   # 每个动作探索标准差的上限，0 表示沿用 PPO 默认行为
+init_checkpoint_min_std = 0.0 # 使用 --init-checkpoint 迁移训练时探索标准差的下限，0 表示保持检查点原值
 
 [ppo.policy]
 actor_hidden_dims = [256, 128, 64]  # 动作网络各隐藏层的神经元数量

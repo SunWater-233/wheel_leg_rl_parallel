@@ -62,6 +62,20 @@ class RobotRunner(OnPolicyRunner):
                 print(f"Low recovery stable: {successes}/{attempts} ({successes / attempts:.1%})", flush=True)
         if self.capped_action_std is not None:
             self.writer.add_scalar("Policy/max_noise_std", self.capped_action_std.detach().max().item(), locs["it"])
+        elif hasattr(self.alg.policy, "std"):
+            std_detached = self.alg.policy.std.detach()
+            self.writer.add_scalar("Policy/max_noise_std", std_detached.max().item(), locs["it"])
+            self.writer.add_scalar("Policy/mean_noise_std", std_detached.mean().item(), locs["it"])
+        if getattr(self.env, "terrain_curriculum_enabled", False):
+            mean_lvl = self.env.terrain_level.float().mean().item()
+            maxed_frac = self.env.terrain_maxed.float().mean().item()
+            self.writer.add_scalar("Curriculum/mean_terrain_level", mean_lvl, locs["it"])
+            self.writer.add_scalar("Curriculum/maxed_fraction", maxed_frac, locs["it"])
+            print(
+                f"Terrain curriculum: mean level {mean_lvl:.2f}/{self.env.lanes.variants - 1}, "
+                f"maxed {maxed_frac:.1%}",
+                flush=True,
+            )
         if self.live_view is None:
             return
         batch_size = self.num_steps_per_env * self.env.num_envs * self.gpu_world_size
@@ -159,6 +173,15 @@ def train(env, options, output, settings, live_view=None):
             initialize_actor_history=history_steps > 1,
         )
         runner.current_learning_iteration = 0
+        min_std = settings["ppo"].get("init_checkpoint_min_std", 0.0)
+        if min_std > 0.0 and isinstance(getattr(runner.alg.policy, "std", None), torch.nn.Parameter):
+            with torch.no_grad():
+                runner.alg.policy.std.clamp_min_(min_std)
+            print(
+                f"Raised policy std floor to {min_std:g} on --init-checkpoint "
+                f"(range {runner.alg.policy.std.min().item():.3f}-{runner.alg.policy.std.max().item():.3f})",
+                flush=True,
+            )
         print(f"Initializing from {options.init_checkpoint} with a fresh optimizer", flush=True)
     runner.limit_exploration(settings["ppo"]["max_action_std"])
     if isinstance(env, WheelLegLocomotionEnv):
@@ -293,8 +316,8 @@ def demo(env, options, ppo, live_view=None):
         motion_input = native_drive
         if not locomotion:
             forward_limits = (-drive_speed, drive_speed)
-        print(f"Genesis keyboard drive: W/S forward/back, A/D steer, Space stop, "
-              f"forward speed limit {drive_speed:g} m/s", flush=True)
+        print(f"Genesis keyboard drive: W/S forward/back, A/D steer, Space brake/stop, "
+              f"speed {drive_speed:g} m/s, accel {options.accel:g} / brake {options.brake_accel:g} m/s^2", flush=True)
         if locomotion:
             print("Z/X raise/lower the continuous body-height target", flush=True)
         if options.free_drive:
@@ -307,6 +330,11 @@ def demo(env, options, ppo, live_view=None):
     control_dt = env.control_dt
     steps = round(options.seconds / control_dt) if options.seconds is not None else None
     if locomotion:
+        if options.keyboard:
+            if options.accel is not None:
+                env.manual_forward_acceleration = options.accel
+            if options.brake_accel is not None:
+                env.manual_brake_acceleration = options.brake_accel
         default_height = env.drop_approach_height if env.forward_drop and options.surface == "cliff" else env.height_nominal
         height_sequence = options.height_sequence or [options.height or default_height]
         env.begin_demo(height_sequence[0], options.surface or "flat", reverse=options.speed < 0.0,
@@ -347,7 +375,8 @@ def demo(env, options, ppo, live_view=None):
         if options.keyboard:
             forward, turn = motion_input.motion_axes()
             vx_cmd = drive_target(forward, forward_limits, drive_speed)
-            yaw_cmd = drive_target(turn, env.cfg["yaw_command"])
+            yaw_cap = abs(options.yaw) if options.yaw else min(4.5, max(abs(v) for v in env.cfg["yaw_command"]))
+            yaw_cmd = drive_target(turn, env.cfg["yaw_command"], yaw_cap)
         else:
             vx_cmd = options.speed if seconds >= 0.5 else 0.0
             yaw_cmd = options.yaw if seconds >= 0.5 else 0.0
@@ -444,6 +473,8 @@ def main():
     parser.add_argument("--config", type=Path, help="Load TOML task settings or a run snapshot")
     parser.add_argument("--seconds", type=float, help="Demo duration (default: 5 s, unlimited with --keyboard)")
     parser.add_argument("--speed", type=float, help="Demo forward speed in m/s (2.5 for native keyboard, 0.35 otherwise)")
+    parser.add_argument("--accel", type=float, help="Keyboard forward acceleration in m/s^2 (default: 1.8 for --keyboard)")
+    parser.add_argument("--brake-accel", type=float, help="Keyboard braking/reversal deceleration in m/s^2 (default: 3.0 for --keyboard)")
     parser.add_argument("--yaw", type=float, default=0.0, help="Demo yaw-rate request in rad/s")
     heights = parser.add_mutually_exclusive_group()
     heights.add_argument("--body-height", type=float, help="Demo base_link clearance above the ground in meters")
@@ -493,6 +524,16 @@ def main():
         args.viewer = True
     if args.speed is None:
         args.speed = 2.5 if native_keyboard else 0.35
+    if args.keyboard:
+        if args.accel is None:
+            args.accel = 1.8
+        if args.brake_accel is None:
+            args.brake_accel = 3.0
+    elif args.accel is not None or args.brake_accel is not None:
+        parser.error("--accel and --brake-accel require --keyboard")
+    for name, value in (("--accel", args.accel), ("--brake-accel", args.brake_accel)):
+        if value is not None and (not isfinite(value) or value <= 0.0):
+            parser.error(f"{name} must be finite and positive")
     if args.keyboard and args.video and args.seconds is None:
         parser.error("Recording a keyboard demo requires a finite --seconds")
     if not isfinite(args.height_hold) or args.height_hold <= 0:

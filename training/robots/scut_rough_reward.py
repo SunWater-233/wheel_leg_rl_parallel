@@ -4,6 +4,8 @@ import torch
 from genesis.utils.geom import inv_transform_by_quat
 from torch.nn.functional import smooth_l1_loss
 
+from configs.experiment import MAX_FORWARD_ACCELERATION
+
 CONTACT_TIME_TOLERANCE = 1e-6
 
 
@@ -14,27 +16,33 @@ class BrakingPitchCost:
         self.settings = settings
         self.dt = dt
         self.previous_forward = torch.zeros_like(commands[:, 0])
+        self.reference_forward = torch.zeros_like(commands[:, 0])
         self.direction = torch.zeros_like(self.previous_forward)
         self.recovery_elapsed = torch.zeros_like(self.previous_forward)
         self.distance_error = torch.zeros_like(self.previous_forward)
 
     def reset(self, ids):
         self.previous_forward[ids] = 0.0
+        self.reference_forward[ids] = 0.0
         self.direction[ids] = 0.0
         self.recovery_elapsed[ids] = 0.0
         self.distance_error[ids] = 0.0
 
     def __call__(self, forward, goal, measured_forward, pitch_projection, pitch_rate, eligible, *, suspended=None):
         cfg = self.settings
-        reference_speed = forward.abs()
-        previous_speed = self.previous_forward.abs()
         brake_eligible = eligible if suspended is None else eligible | suspended
         stop_requested = brake_eligible & (goal.abs() <= cfg["zero_speed"])
+        max_step = MAX_FORWARD_ACCELERATION * self.dt
+        slewed_ref = self.reference_forward + (forward - self.reference_forward).clamp(-max_step, max_step)
+        next_ref = torch.where(stop_requested, slewed_ref, forward)
+        reference_speed = next_ref.abs()
+        previous_speed = self.reference_forward.abs()
         start = (stop_requested & (self.direction == 0.0) & (previous_speed >= cfg["start_speed"])
                  & (reference_speed < previous_speed))
-        direction = torch.where(start, self.previous_forward.sign(), self.direction)
+        direction = torch.where(start, self.reference_forward.sign(), self.direction)
         direction = direction.masked_fill(~stop_requested, 0.0)
         self.previous_forward.copy_(forward)
+        self.reference_forward.copy_(next_ref)
 
         recovering = (direction != 0.0) & (reference_speed <= cfg["zero_speed"])
         self.recovery_elapsed.copy_(torch.where(recovering, self.recovery_elapsed + self.dt * eligible, 0.0))
@@ -249,14 +257,40 @@ class ScutRoughReward:
         forward_upright_gate = (
             torch.exp(-(gx / upright_scale).square()) if upright_scale > 0.0 else 1.0
         )
+        if tracking["vel_height_gate_enabled"]:
+            full_error = tracking["vel_height_gate_full_error"]
+            zero_error = tracking["vel_height_gate_zero_error"]
+            abs_height_error = height_error.abs()
+            band = zero_error - full_error
+            if band <= 0.0:
+                vel_height_gate = (abs_height_error <= full_error).to(height_error.dtype)
+            else:
+                vel_height_gate = ((zero_error - abs_height_error) / band).clamp(0.0, 1.0)
+            bypass_gate = airborne
+            if tracking.get("vel_height_gate_flat_only", False):
+                bypass_gate = bypass_gate | (env.surface != 0)
+            vel_height_gate = torch.where(bypass_gate, torch.ones_like(vel_height_gate), vel_height_gate)
+        else:
+            vel_height_gate = 1.0
+        spin_threshold = tracking.get("spin_yaw_threshold", 0.0)
+        if spin_threshold > 0.0:
+            yaw_scale = torch.where(
+                yaw_target.abs() > spin_threshold,
+                yaw_error.new_tensor(tracking["spin_yaw_error_scale"]),
+                yaw_error.new_tensor(tracking["yaw_error_scale"]),
+            )
+        else:
+            yaw_scale = tracking["yaw_error_scale"]
         tracking_reward = (
             tracking["forward_reward_weight"]
             * forward_upright_gate
+            * vel_height_gate
             * torch.exp(-forward_error.clamp(-forward_clip, forward_clip).square() / tracking["forward_error_width"])
             - (tracking["forward_error_scale"] * forward_error).square()
             + tracking["yaw_reward_weight"]
+            * vel_height_gate
             * torch.exp(-yaw_error.clamp(-yaw_clip, yaw_clip).square() / tracking["yaw_error_width"])
-            - (tracking["yaw_error_scale"] * yaw_error).square()
+            - (yaw_scale * yaw_error).square()
             - tracking["standing_drift_weight"] * (stand * lin_vel[:, :2].abs().sum(dim=1))
             + tracking["pitch_reward_weight"] * torch.exp(-gx.square() / tracking["pitch_width"])
             + tracking["roll_reward_weight"] * torch.exp(-gy.square() / tracking["roll_width"])
@@ -286,10 +320,11 @@ class ScutRoughReward:
         reward = tracking_reward - regularization_cost
         if self.braking_cost is not None:
             on_transition = (env.surface != 0) & getattr(env, "transition_course", False)
-            eligible = ((env.surface == 0) | on_transition) & ~airborne & ~fallen
+            on_brake_surface = (env.surface == 0) | on_transition
+            eligible = on_brake_surface & ~airborne & ~fallen
             suspended = None
             if self.settings["braking"]["preserve_across_airborne"]:
-                suspended = on_transition & airborne & ~fallen
+                suspended = on_brake_surface & airborne & ~fallen
             reward -= self.braking_cost(forward, env.goals[:, 0], measured_forward, gx, ang_vel[:, 1], eligible,
                                         suspended=suspended)
         if self.minimum_body_clearance is None:

@@ -1,6 +1,7 @@
 """Batched Genesis stepping and flat-ground locomotion task."""
 
 from abc import abstractmethod
+from math import radians
 
 import genesis as gs
 from genesis.utils.geom import inv_transform_by_quat
@@ -74,6 +75,11 @@ class FlatEnv(VecEnv):
         self.body_clearance = self.commands.new_zeros(num_envs)
         self.body_height_offset = 0.0
         self.last_actions = torch.zeros((num_envs, self.num_actions), device=self.device)
+        termination = self.cfg["termination"]
+        self.instant_pitch_rad = radians(termination["instant_pitch_deg"])
+        self.sustained_pitch_rad = radians(termination["sustained_pitch_deg"])
+        self.sustained_pitch_seconds = termination["sustained_pitch_seconds"]
+        self.pitch_exceed_time = self.commands.new_zeros(num_envs)
         self.world_gravity = torch.tensor((0.0, 0.0, -1.0), device=self.device).expand(num_envs, -1).contiguous()
         self.all_envs = torch.arange(num_envs, device=self.device)
         self._initialize_task()
@@ -119,6 +125,7 @@ class FlatEnv(VecEnv):
         self.robot.set_qpos(self.home_qpos[ids], envs_idx=ids, zero_velocity=True)
         self.episode_length_buf[ids] = 0
         self.last_actions[ids] = 0.0
+        self.pitch_exceed_time[ids] = 0.0
         self.scut_reward.reset(ids)
         for axis, key in enumerate(("forward_command", "yaw_command")):
             low, high = self.cfg[key]
@@ -147,10 +154,25 @@ class FlatEnv(VecEnv):
         critic = torch.cat((policy, lin_vel), dim=-1)
         return TensorDict({"policy": policy, "critic": critic}, batch_size=[self.num_envs])
 
+    def _pitch_fallen(self, gravity, *, active=None):
+        pitch_abs = torch.atan2(gravity[:, 0], gravity[:, 1:].norm(dim=1)).abs()
+        exceeded = pitch_abs > self.sustained_pitch_rad
+        if active is not None:
+            exceeded = exceeded & active
+        self.pitch_exceed_time.copy_(torch.where(exceeded, self.pitch_exceed_time + self.control_dt, 0.0))
+        sustained = (self.sustained_pitch_seconds > 0.0) & (
+            self.pitch_exceed_time >= self.sustained_pitch_seconds - 1e-6
+        )
+        instant = pitch_abs > self.instant_pitch_rad
+        if active is not None:
+            instant = instant & active
+        return instant | sustained
+
     def _termination(self, height, gravity, contact):
         self.body_clearance.copy_(height)
         body_contact = contact[:, self.body_links].norm(dim=-1).amax(dim=1) > 10.0
-        fallen = body_contact | (height < self.min_height) | (gravity[:, 2] > -0.65)
+        pitch_fallen = self._pitch_fallen(gravity)
+        fallen = body_contact | (height < self.min_height) | (gravity[:, 2] > -0.65) | pitch_fallen
         return fallen, False
 
     def _after_step(self, extras, done, lin_vel, ang_vel):

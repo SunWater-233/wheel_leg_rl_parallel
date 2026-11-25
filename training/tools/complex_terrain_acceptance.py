@@ -86,6 +86,11 @@ def compare(args):
     settings, run = snapshots[0]
     task = settings['task']
     locomotion = task['locomotion']
+    history_steps = [cfg['task']['locomotion']['actor_history_steps'] for cfg, _ in snapshots]
+    nonzero_hist = {steps for steps in history_steps if steps > 1}
+    if len(nonzero_hist) > 1:
+        raise ValueError('Checkpoints with observation history must share the same actor_history_steps')
+    locomotion['actor_history_steps'] = max(history_steps)
     if any(meta.get('model_sha256') != run['model_sha256'] or meta.get('task') != 'locomotion'
            for _, meta in snapshots):
         raise ValueError('Checkpoints must use the same locomotion robot model')
@@ -99,8 +104,8 @@ def compare(args):
     courses = cases * len(args.checkpoints)
     env = AcceptanceEnv(TRAINING_DIR / run['model'], len(trials), episode_seconds=TIMEOUT_S + 1, task_config=task)
     policies = []
-    for checkpoint, (config, _) in zip(args.checkpoints, snapshots, strict=True):
-        runner = OnPolicyRunner(env, runner_config(config['ppo']), device=str(env.device))
+    for checkpoint, (config, _), steps in zip(args.checkpoints, snapshots, history_steps, strict=True):
+        runner = OnPolicyRunner(env, runner_config(config['ppo'], actor_history_steps=steps), device=str(env.device))
         load_checkpoint(runner, checkpoint, load_optimizer=False)
         policies.append(runner.get_inference_policy(device=env.device))
     with torch.inference_mode():

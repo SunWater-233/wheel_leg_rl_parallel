@@ -171,6 +171,9 @@ class WheelLegFlatEnv(FlatEnv):
         self.passive_dofs = [joint.dofs_idx_local[0] for joint in robot.joints
                              if joint.name.startswith(("knee_", "drive_l1_", "l1_node_", "node_l2_", "gas_up_"))]
         robot.set_dofs_damping([0.04] * len(self.passive_dofs), self.passive_dofs)
+        self.guide_dofs = [joint.dofs_idx_local[0] for joint in robot.joints if joint.name.startswith("guide_")]
+        robot.set_dofs_damping([0.005] * len(self.guide_dofs), self.guide_dofs)
+        robot.set_dofs_armature([1e-4] * len(self.guide_dofs), self.guide_dofs)
 
     def _drive(self, actions):
         offsets = (actions[:, :4] * self.leg_action_scale).clamp(-0.35, 0.35)

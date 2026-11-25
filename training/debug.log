@@ -195,3 +195,36 @@
 [51700:35280:1124/060337.486:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:22
 [51700:35280:1124/060337.486:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:22
 [51700:35280:1124/060344.768:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[26876:11156:1125/013159.694:WARNING:t_skinfilemap.cpp(61)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v2.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v2.filemap.sogouime5813547f6b7
+[26876:11156:1125/013159.694:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:1
+[26876:11156:1125/013159.694:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:2
+[26876:11156:1125/013159.733:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi168.v2.filemap.sogouime
+[26876:11156:1125/013159.733:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:2
+[26876:11156:1125/013159.733:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:2
+[26876:11156:1125/014714.140:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi168.v3.filemap.sogouime
+[26876:11156:1125/014714.140:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:2
+[26876:11156:1125/014714.141:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:3
+[23668:19500:1125/020424.186:WARNING:t_skinfilemap.cpp(61)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v3.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v3.filemap.sogouime5813547f6b7
+[23668:19500:1125/020424.186:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:1
+[23668:19500:1125/020424.186:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:3
+[23668:19500:1125/020424.221:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi168.v3.filemap.sogouime
+[23668:19500:1125/020424.221:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:3
+[23668:19500:1125/020424.221:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:3
+[23668:19500:1125/021639.354:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi168.v5.filemap.sogouime
+[23668:19500:1125/021639.354:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:3
+[23668:19500:1125/021639.354:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:5
+[25916:31176:1125/034835.717:WARNING:t_skinfilemap.cpp(61)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.v5.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.v5.filemap.sogouime5813547f6b7
+[25916:31176:1125/034835.717:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:1
+[25916:31176:1125/034835.717:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:5
+[25916:31176:1125/034835.758:WARNING:t_skinfilemap.cpp(68)] SGRenderLog:CheckUpdate newMem.OpenMem Suc, szNewMem:Local\sgime_skin.Dpi168.v5.filemap.sogouime
+[25916:31176:1125/034835.758:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:5
+[25916:31176:1125/034835.758:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:5
+[25916:31176:1125/034901.127:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0
+[25916:31176:1125/034901.132:WARNING:t_skinfilemap.cpp(61)] SGRenderLog:CheckUpdate newMem.OpenMem failed, szNewMem:Local\sgime_skin.Dpi168.v6.filemap.sogouime err:系统错误2: 系统找不到指定的文件。  
+打开Filemap失败: Local\sgime_skin.Dpi168.v6.filemap.sogouime5813547f6b7
+[25916:31176:1125/034901.132:WARNING:t_skinfilemap.cpp(70)] SGRenderLog:CheckUpdate finish: old version:5
+[25916:31176:1125/034901.132:WARNING:t_skinfilemap.cpp(72)] SGRenderLog:CheckUpdate finish: new version:6
+[25916:31176:1125/034904.652:WARNING:imeconvertstate.cpp(4218)] kernel convert return count0

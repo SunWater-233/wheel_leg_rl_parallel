@@ -143,6 +143,15 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.cliff_approach_speed = settings["cliff_approach_speed"]
         self.observation_noise = None
         self.actor_true_forward_speed = settings["actor_true_forward_speed"]
+        self.actor_history_steps = settings["actor_history_steps"]
+        self.policy_obs_dim = 28
+        if self.actor_history_steps > 1:
+            self.policy_history = self.commands.new_zeros((self.num_envs, self.actor_history_steps - 1,
+                                                           self.policy_obs_dim))
+            self.last_policy_obs = self.commands.new_zeros((self.num_envs, self.policy_obs_dim))
+            self.history_needs_fill = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        else:
+            self.policy_history = None
         self.critic_scan_offsets = None
         if settings["critic_terrain_observations"]:
             self.critic_scan_offsets = self.commands.new_tensor(self.critic_scan_distances)
@@ -218,9 +227,14 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             self.transition_still_time = torch.zeros_like(self.command_time)
             self.transition_stop_elapsed = torch.zeros_like(self.command_time)
             self.transition_peak_command = torch.zeros_like(self.command_time)
+        self.high_stair_surfaces = None
         if self.lanes is not None:
             self.lane_centers = self.commands.new_tensor(self.lanes.centers)
             self.surface_weights = self.commands.new_tensor(self.lanes.surface_weights)
+            self.high_stair_surfaces = self.surface.new_tensor(
+                [surface in ("stairs_slow", "stairs_fast") for surface in self.lanes.surfaces],
+                dtype=torch.bool,
+            )
         if isinstance(self.lanes, ScutV1Lanes):
             self.variant_weights = self.commands.new_tensor(self.lanes.variant_weights)
             self.lane_spawn_x = self.commands.new_tensor(self.lanes.spawn_x)
@@ -535,6 +549,10 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
             self.heading_turning[ids] = False
         if self.critic_scan_offsets is not None:
             self.critic_wheel_contacts[ids] = False
+        if self.policy_history is not None:
+            self.policy_history[ids] = 0.0
+            self.last_policy_obs[ids] = 0.0
+            self.history_needs_fill[ids] = True
         self.episode_length_buf[ids] = 0
         self.episode_steps[ids] = 0
         self.height_errors[ids] = 0.0
@@ -551,6 +569,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
                 self.traversal_reverse[ids] = torch.rand(ids.numel(), device=self.device) < 0.5
         self.leg_saturated_steps[ids] = 0
         self.last_actions[ids] = 0.0
+        self.pitch_exceed_time[ids] = 0.0
         self.scut_reward.reset(ids)
         self.height_rate[ids] = 0.0
         self.commands[ids] = 0.0
@@ -640,7 +659,7 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
     def _advance_commands(self, lin_vel, ang_vel):
         targets = self.goals.clamp(min=self.command_lower, max=self.command_upper)
         if self.heading_hold_enabled:
-            targets[:, 1] = self._heading_yaw_target(targets[:, 1]).clamp(
+            targets[:, 1] = self._heading_yaw_target(targets[:, 1], ang_vel[:, 2]).clamp(
                 min=self.command_lower[1], max=self.command_upper[1]
             )
         if self.recovery_fraction:
@@ -683,16 +702,19 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         w, x, y, z = quat.unbind(dim=1)
         return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y.square() + z.square()))
 
-    def _heading_yaw_target(self, requested_rate):
+    def _heading_yaw_target(self, requested_rate, yaw_rate):
         yaw = self._yaw_from_quat(self.robot.get_quat())
         turning = requested_rate.abs() > 1e-6
-        # Latch the measured heading on release, including after a turn at zero forward speed.
+        # After a turn ends, let the slewed yaw command and measured yaw rate settle before latching heading.
+        settling = self.heading_turning & ((self.commands[:, 1].abs() > 0.05) | (yaw_rate.abs() > 0.10))
         self.heading_target.copy_(torch.where(turning | self.heading_turning, yaw, self.heading_target))
-        self.heading_turning.copy_(turning)
+        self.heading_turning.copy_(turning | settling)
         error = self.heading_target - yaw
         error = torch.atan2(error.sin(), error.cos())
         correction = self.heading_gain * error.sign() * (error.abs() - self.heading_deadband).clamp_min(0.0)
-        return torch.where(turning, requested_rate, correction.clamp(-self.heading_max_yaw_rate, self.heading_max_yaw_rate))
+        hold = torch.where(settling, torch.zeros_like(requested_rate),
+                           correction.clamp(-self.heading_max_yaw_rate, self.heading_max_yaw_rate))
+        return torch.where(turning, requested_rate, hold)
 
     def _leg_projections(self, gravity):
         """Return leg heights and signed wheel offsets ahead of each hip."""
@@ -744,6 +766,13 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         observations = {"policy": policy, "critic": critic}
         if self.actor_true_forward_speed:
             observations["body_forward_speed"] = lin_vel[:, :1].contiguous()
+        if self.policy_history is not None:
+            if self.history_needs_fill.any():
+                fill = self.history_needs_fill
+                self.policy_history[fill] = policy[fill, None, :]
+                self.history_needs_fill[fill] = False
+            self.last_policy_obs.copy_(policy)
+            observations["policy_history"] = self.policy_history.reshape(self.num_envs, -1).contiguous()
         return TensorDict(observations, batch_size=[self.num_envs])
 
     def _critic_terrain_observations(self):
@@ -840,7 +869,9 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.leg_height_errors += (heights.mean(dim=1) - self.commands[:, 2]).abs()
         if self.forward_drop:
             self._update_drop_landing(pos, contact)
-        fallen = body_contact | (clearance < 0.045) | (gravity[:, 2] > -0.65)
+        not_recovering = None if not self.recovery_fraction else (self.recovery_steps < 0)
+        pitch_fallen = self._pitch_fallen(gravity, active=not_recovering)
+        fallen = body_contact | (clearance < 0.045) | (gravity[:, 2] > -0.65) | pitch_fallen
         if self.recovery_fraction:
             fallen = self._check_recovery(fallen, out_of_bounds, gravity, contact, height_target)
         return fallen, out_of_bounds
@@ -870,6 +901,10 @@ class WheelLegLocomotionEnv(WheelLegFlatEnv):
         self.landing_elapsed.masked_fill_(touchdown, 0.0)
 
     def _after_step(self, extras, done, lin_vel, ang_vel):
+        if self.policy_history is not None:
+            if self.policy_history.shape[1] > 1:
+                self.policy_history[:, 1:] = self.policy_history[:, :-1].clone()
+            self.policy_history[:, 0] = self.last_policy_obs
         if self.critic_scan_offsets is not None:
             self.critic_wheel_contacts.copy_(extras["wheel_contacts"])
         if self.height_curriculum_rollout:

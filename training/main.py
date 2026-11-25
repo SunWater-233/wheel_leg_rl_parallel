@@ -89,7 +89,19 @@ def add_actor_speed_input(module, state, prefix, *_):
         print("Initialized actor speed input with zero weights", flush=True)
 
 
-def load_checkpoint(runner, path, *, load_optimizer, initialize_actor_speed=False):
+def add_actor_history_inputs(module, state, prefix, *_):
+    name = f"{prefix}actor.0.weight"
+    old = state.get(name)
+    weight = module.actor[0].weight
+    if old is None or old.shape[0] != weight.shape[0]:
+        return
+    extra_dims = weight.shape[1] - old.shape[1]
+    if extra_dims > 0:
+        state[name] = torch.nn.functional.pad(old, (0, extra_dims))
+        print(f"Initialized {extra_dims} actor history inputs with zero weights", flush=True)
+
+
+def load_checkpoint(runner, path, *, load_optimizer, initialize_actor_speed=False, initialize_actor_history=False):
     def add_critic_inputs(module, state, prefix, *_):
         name = f"{prefix}critic.0.weight"
         old = state.get(name)
@@ -105,6 +117,10 @@ def load_checkpoint(runner, path, *, load_optimizer, initialize_actor_speed=Fals
     with ExitStack() as stack:
         if initialize_actor_speed:
             stack.enter_context(runner.alg.policy.register_load_state_dict_pre_hook(add_actor_speed_input))
+        if initialize_actor_history:
+            if load_optimizer:
+                raise ValueError("Use --init-checkpoint to add history observations to an existing actor")
+            stack.enter_context(runner.alg.policy.register_load_state_dict_pre_hook(add_actor_history_inputs))
         if isinstance(runner.env, WheelLegLocomotionEnv) and runner.env.critic_scan_offsets is not None:
             stack.enter_context(runner.alg.policy.register_load_state_dict_pre_hook(add_critic_inputs))
         info = runner.load(str(path), load_optimizer=load_optimizer, map_location=str(runner.env.device)) or {}
@@ -120,8 +136,13 @@ def train(env, options, output, settings, live_view=None):
     if isinstance(env, WheelLegLocomotionEnv):
         env.enable_observation_noise()
     actor_speed = getattr(env, "actor_true_forward_speed", False)
-    runner = RobotRunner(env, runner_config(settings["ppo"], actor_true_forward_speed=actor_speed),
-                         log_dir=str(output), device=str(env.device))
+    history_steps = getattr(env, "actor_history_steps", 1)
+    runner = RobotRunner(
+        env,
+        runner_config(settings["ppo"], actor_true_forward_speed=actor_speed, actor_history_steps=history_steps),
+        log_dir=str(output),
+        device=str(env.device),
+    )
     runner.live_view = live_view
     if options.resume is not None:
         load_checkpoint(runner, options.resume, load_optimizer=True)
@@ -130,7 +151,13 @@ def train(env, options, output, settings, live_view=None):
         runner.current_learning_iteration += 1
         print(f"Resuming at iteration {runner.current_learning_iteration} from {options.resume}", flush=True)
     elif options.init_checkpoint is not None:
-        load_checkpoint(runner, options.init_checkpoint, load_optimizer=False, initialize_actor_speed=actor_speed)
+        load_checkpoint(
+            runner,
+            options.init_checkpoint,
+            load_optimizer=False,
+            initialize_actor_speed=actor_speed,
+            initialize_actor_history=history_steps > 1,
+        )
         runner.current_learning_iteration = 0
         print(f"Initializing from {options.init_checkpoint} with a fresh optimizer", flush=True)
     runner.limit_exploration(settings["ppo"]["max_action_std"])
@@ -242,7 +269,11 @@ def drive_target(axis, limits, magnitude=None):
 def demo(env, options, ppo, live_view=None):
     policy = None
     if options.checkpoint is not None:
-        cfg = runner_config(ppo, actor_true_forward_speed=getattr(env, "actor_true_forward_speed", False))
+        cfg = runner_config(
+            ppo,
+            actor_true_forward_speed=getattr(env, "actor_true_forward_speed", False),
+            actor_history_steps=getattr(env, "actor_history_steps", 1),
+        )
         runner = OnPolicyRunner(env, cfg, device=str(env.device))
         load_checkpoint(runner, options.checkpoint, load_optimizer=False)
         policy = runner.get_inference_policy(device=env.device)
@@ -474,6 +505,7 @@ def main():
     run = {}
     config_path = args.config
     settings = None
+    checkpoint_settings = None
     try:
         if checkpoint is not None:
             if not checkpoint.is_file():
@@ -481,10 +513,17 @@ def main():
             snapshot = checkpoint.with_name(SNAPSHOT_NAME)
             if snapshot.is_file():
                 settings, run = load_snapshot(snapshot)
+                checkpoint_settings = settings
                 if not isinstance(run, dict):
                     raise ValueError(f"Expected run metadata in {snapshot}")
         if config_path is not None or settings is None:
             settings = load_config(config_path)
+            if args.mode == "demo" and checkpoint_settings is not None:
+                src = checkpoint_settings["task"]["locomotion"]
+                dst = settings["task"]["locomotion"]
+                if src["enabled"] and dst["enabled"]:
+                    for key in ("actor_history_steps", "actor_true_forward_speed", "critic_terrain_observations"):
+                        dst[key] = src[key]
     except (OSError, ValueError) as error:
         parser.error(str(error))
 

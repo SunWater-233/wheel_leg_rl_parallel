@@ -5,6 +5,12 @@ use_cad_base_hull = false     # V0.2 使用 CAD 外形凸包作为车身碰撞�
 forward_command = [-0.5, 0.5] # 纵向速度指令范围，单位为米/秒，负值表示后退
 yaw_command = [-0.5, 0.5]     # 车身转向角速度指令范围，单位为弧度/秒
 
+# 姿态超限终止条件：放行上台阶时导轮短暂借力接触，拦截平地/下坎后大倾角导轮滑行。
+[task.termination]
+instant_pitch_deg = 35.0       # 俯仰角绝对值超过此值时立即判定倒地，单位为度
+sustained_pitch_deg = 22.0     # 大俯仰持续终止门槛，单位为度
+sustained_pitch_seconds = 0.30 # 俯仰角持续超过门槛达到此时长后判定倒地，单位为秒，填 0 时关闭
+
 # 华南虎 V14 Rough-v1 奖励默认值。各实验的 TOML 可以覆盖下面的任意参数。
 # 跟踪指令和保持车身姿态。指数奖励在误差为零时最大，宽度越大，奖励随误差下降得越慢。
 [task.scut_rough_reward.tracking]
@@ -14,6 +20,7 @@ forward_reward_weight = 1.25 # 纵向速度跟踪的指数奖励权重
 forward_error_clip = 1.0     # 计算指数奖励时，纵向速度误差的绝对值最多按此值计，单位为米/秒
 forward_error_width = 0.5    # 纵向速度跟踪的指数奖励宽度
 forward_error_scale = 0.25   # 纵向速度误差先乘此值再平方扣分
+forward_upright_pitch_scale = 0.30 # 纵向速度指数奖励的俯仰直立门控尺度（按重力前向分量计，填 0 时关闭）
 yaw_reward_weight = 1.0      # 转向角速度跟踪的指数奖励权重
 yaw_error_clip = 0.8         # 计算指数奖励时，转向角速度误差的绝对值最多按此值计，单位为弧度/秒
 yaw_error_width = 0.25       # 转向角速度跟踪的指数奖励宽度
@@ -26,7 +33,7 @@ roll_width = 0.01            # 横滚指数奖励的宽度，以车身坐标系�
 tilt_base_scale = 2.0        # 俯仰和横滚误差平方前的基础倍率
 tilt_low_speed_scale = 2.0   # 纵向速度指令接近零时，姿态误差倍率额外增加的量
 tilt_speed_width = 3.0       # 越大，额外的姿态惩罚在更高的纵向速度指令下仍然较强
-pitch_penalty_weight = 2.0   # 地面俯仰平方惩罚的权重。越大，越倾向抑制点头和仰头
+pitch_penalty_weight = 2.0   # 俯仰平方惩罚的权重，地面和腾空时都生效
 ground_pitch_error_scale = 0.02618 # 车身前向重力投影的归一化尺度，约 1.5°
 ground_pitch_error_weight = 0.0   # 地面俯仰误差惩罚，权重为 0 时关闭
 ground_pitch_rate_scale = 0.25    # 地面俯仰角速度的归一化尺度，单位为弧度/秒
@@ -59,6 +66,8 @@ wheel_gap_scale = 5.0                 # 轮心错位距离先乘此值再平方�
 [task.scut_rough_reward.regularization]
 torque_weight = 1e-5                          # 所有执行器力矩平方惩罚的权重
 wheel_power_weight = 1e-5                     # 各轮输出的正机械功率相加后扣分，此项控制扣分权重
+unloaded_wheel_force_threshold = 5.0          # 单轮接触力低于此值时视为离地卸载，单位为牛
+unloaded_wheel_spin_weight = 0.005            # 卸载单轮轮速偏离目标线速度对应轮速的平方惩罚权重
 vertical_velocity_weight = 0.5                # 车身上下运动速度的平方惩罚权重
 body_angular_velocity_weight = 0.05           # 车身俯仰和横滚角速度的平方惩罚权重
 nonwheel_contact_force_threshold = 3.0        # 非轮子部件的接触力超过此值时计为碰撞，单位为牛
@@ -91,10 +100,10 @@ knee_margin_fraction = 0.03                  # 膝关节行程两端各留出的
 body_clearance_margin = 0.08                 # 判定腾空时，车身比最低站姿额外高出的距离门槛，单位为米
 wheel_clearance_threshold = 0.08             # 判定腾空时，两个轮胎都要离地超过的距离，单位为米
 liftoff_wheel_force_threshold = 1.0          # 判定腾空时，两轮接触力都要低于此值，单位为牛
-landing_wheel_force_threshold = 20.0         # 单轮接触力要超过此值，才可能算作接地，单位为牛
+landing_wheel_force_threshold = 10.0         # 单轮接触力要超过此值，才可能算作接地，单位为牛
 landing_wheel_center_height = 0.15           # 同时要求该轮轮心低于这个离地高度，单位为米
-body_contact_force_threshold = 5.0           # 任一机身部件接触力超过此值时开始计时，单位为牛
-wheel_contact_end_seconds = 0.30             # 任一轮持续接地达到此时长后结束腾空阶段，单位为秒
+body_contact_force_threshold = 5.0           # 任一非主轮部件接触力超过此值时开始计时，单位为牛
+wheel_contact_end_seconds = 0.06             # 任一轮累计接地达到此时长后结束腾空阶段（回弹期间暂停计时），单位为秒
 body_contact_end_seconds = 0.25              # 机身持续接触达到此时长后结束腾空阶段，单位为秒
 max_airborne_seconds = 1.0                   # 腾空阶段的超时阈值，单位为秒
 wheel_contact_transition_seconds = 0.02      # 车轮持续接地达到此时长后，从空中奖励切到落地轮速惩罚，单位为秒
@@ -168,6 +177,7 @@ joint_velocity = 0.0 # 关节角速度，单位为弧度/秒，在观测缩放�
 enabled = false                   # 是否启用连续腿高任务
 critic_terrain_observations = false # 向 critic 提供轮子接触和轮边地形高度
 actor_true_forward_speed = false # Diagnostic only: expose simulated body-frame vx to the actor.
+actor_history_steps = 1           # 策略观测堆叠的历史帧数（1 表示仅当前帧，>1 表示当前帧 + 过去 N-1 帧本体历史）
 leg_torque_limit = 12.0           # 单个主动腿关节的力矩上限，单位为牛·米
 wheel_torque_limit = 5.0          # 单侧轮端伺服的力矩上限，单位为牛·米
 wheel_target_delay_steps = 0      # 轮速目标延迟，按 2 ms 物理步计，最大 9 步

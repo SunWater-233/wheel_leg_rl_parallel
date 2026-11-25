@@ -126,28 +126,31 @@ class ScutRoughReward:
         ground_mean = ground.masked_fill(~valid, 0.0).sum(dim=1) / valid.sum(dim=1).clamp_min(1)
         return torch.where(valid.any(dim=1), base_pos[:, 2] - ground_mean, fallback)
 
-    def _airborne(self, wheels, contact):
+    def _airborne(self, wheels, contact, wheel_force):
         env = self.env
         cfg = self.settings["airborne"]
         dt = env.control_dt
-        wheel_force = contact[:, env.wheel_links].norm(dim=-1)
         wheel_clearance = wheels[..., 2] - env.ground_height_at(wheels) - env.wheel_radius
-        # Map the body-height gate to the V0.2 stance. Keep SCUT's wheel clearance and contact timings.
+        # Map the body-height gate to the V0.2 stance. Keep SCUT's stair exclusion and bounce-tolerant exit timer.
         enter = (env.body_clearance > self.minimum_body_clearance + cfg["body_clearance_margin"])
         enter &= (wheel_clearance > cfg["wheel_clearance_threshold"]).all(dim=1)
         enter &= (wheel_force < cfg["liftoff_wheel_force_threshold"]).all(dim=1)
+        high_stairs = getattr(env, "high_stair_surfaces", None)
+        if high_stairs is not None:
+            enter &= ~high_stairs[env.surface]
         active = self.air_time > 0.0
-        wheel_loaded = (wheel_force > cfg["landing_wheel_force_threshold"]) & (
-            wheel_clearance + env.wheel_radius < cfg["landing_wheel_center_height"]
-        )
-        body_loaded = (contact[:, env.body_links].norm(dim=-1) > cfg["body_contact_force_threshold"]).any(dim=1)
-        self.wheel_contact_time.copy_(torch.where(active[:, None] & wheel_loaded, self.wheel_contact_time + dt, 0.0))
+        wheel_near_ground = wheel_clearance + env.wheel_radius < cfg["landing_wheel_center_height"]
+        wheel_loaded = (wheel_force > cfg["landing_wheel_force_threshold"]) & wheel_near_ground
+        body_loaded = (contact[:, self.nonwheel_links].norm(dim=-1) > cfg["body_contact_force_threshold"]).any(dim=1)
+        held_wheel_time = torch.where(active[:, None] & wheel_near_ground, self.wheel_contact_time, 0.0)
+        self.wheel_contact_time.copy_(torch.where(active[:, None] & wheel_loaded, held_wheel_time + dt, held_wheel_time))
         self.body_contact_time.copy_(torch.where(active & body_loaded, self.body_contact_time + dt, 0.0))
         wheel_time = self.wheel_contact_time.amax(dim=1)
         finished = (
             (wheel_time >= cfg["wheel_contact_end_seconds"] - CONTACT_TIME_TOLERANCE)
             | (self.body_contact_time >= cfg["body_contact_end_seconds"] - CONTACT_TIME_TOLERANCE)
             | (self.air_time >= cfg["max_airborne_seconds"] - dt)
+            | (high_stairs[env.surface] if high_stairs is not None else False)
         )
         airborne = enter | (active & ~finished)
         self.air_time.copy_(torch.where(airborne, self.air_time + dt, 0.0))
@@ -195,10 +198,11 @@ class ScutRoughReward:
         wheels = torch.stack([wheel.get_anchor_pos() for wheel in env.wheels], dim=1)
         quat = env.robot.get_quat().contiguous()
         motion_cost = self._motion_cost(actions, joint_velocity, wheels, quat)
+        wheel_force = contact[:, env.wheel_links].norm(dim=-1)
         if self.minimum_body_clearance is None:
             airborne = torch.zeros_like(fallen)
         else:
-            airborne, wheel_time = self._airborne(wheels, contact)
+            airborne, wheel_time = self._airborne(wheels, contact, wheel_force)
         in_air = airborne.float()
         nonwheel_force = contact[:, self.nonwheel_links].norm(dim=-1)
         bad_contact = (nonwheel_force > regularization["nonwheel_contact_force_threshold"]).any(dim=1)
@@ -223,15 +227,15 @@ class ScutRoughReward:
         tilt_scale = tracking["tilt_base_scale"] + tracking["tilt_low_speed_scale"] * torch.exp(
             -forward.square() / tracking["tilt_speed_width"]
         )
-        pitch_cost = tracking["pitch_penalty_weight"] * (~airborne) * (tilt_scale * gx).square()
+        pitch_cost = tracking["pitch_penalty_weight"] * (tilt_scale * gx).square()
         if tracking["ground_pitch_error_weight"] or tracking["ground_pitch_rate_weight"]:
             pitch_rate = ang_vel[:, 1]
             zero = torch.zeros_like(gx)
             # Resolve small errors near level while retaining a gradient through large excursions.
             angle_error = smooth_l1_loss(gx / tracking["ground_pitch_error_scale"], zero, reduction="none")
             rate_error = smooth_l1_loss(pitch_rate / tracking["ground_pitch_rate_scale"], zero, reduction="none")
-            pitch_cost += (~airborne) * (tracking["ground_pitch_error_weight"] * angle_error
-                                         + tracking["ground_pitch_rate_weight"] * rate_error)
+            pitch_cost += (tracking["ground_pitch_error_weight"] * angle_error
+                           + (~airborne) * tracking["ground_pitch_rate_weight"] * rate_error)
         roll_cost = tracking["roll_penalty_weight"] * (tilt_scale * gy).square()
         if tracking["flat_roll_error_weight"] or tracking["flat_roll_rate_weight"]:
             flat_grounded = (env.surface == 0) & ~airborne
@@ -241,8 +245,13 @@ class ScutRoughReward:
             roll_cost += flat_grounded * (tracking["flat_roll_error_weight"] * angle_error
                                           + tracking["flat_roll_rate_weight"] * rate_error)
 
+        upright_scale = tracking["forward_upright_pitch_scale"]
+        forward_upright_gate = (
+            torch.exp(-(gx / upright_scale).square()) if upright_scale > 0.0 else 1.0
+        )
         tracking_reward = (
             tracking["forward_reward_weight"]
+            * forward_upright_gate
             * torch.exp(-forward_error.clamp(-forward_clip, forward_clip).square() / tracking["forward_error_width"])
             - (tracking["forward_error_scale"] * forward_error).square()
             + tracking["yaw_reward_weight"]
@@ -258,12 +267,17 @@ class ScutRoughReward:
         )
         wheel_vel = joint_velocity[:, 4:]
         wheel_torque = torque[:, 4:]
+        unloaded_wheel = wheel_force < regularization["unloaded_wheel_force_threshold"]
+        forward_wheel_vel = wheel_vel * env.wheel_direction
+        target_wheel_vel = forward_target[:, None] / env.wheel_radius
+        unloaded_wheel_spin = (unloaded_wheel * (forward_wheel_vel - target_wheel_vel).square()).sum(dim=1)
         contact_weight = regularization["nonwheel_contact_weight"] + regularization["airborne_nonwheel_contact_extra_weight"] * in_air
         fall_weight = regularization["fall_weight"] + regularization["airborne_fall_extra_weight"] * in_air
         regularization_cost = (
             motion_cost
             + regularization["torque_weight"] * torque.square().sum(dim=1)
             + regularization["wheel_power_weight"] * (wheel_torque * wheel_vel).clamp_min(0.0).sum(dim=1)
+            + regularization["unloaded_wheel_spin_weight"] * unloaded_wheel_spin
             + regularization["vertical_velocity_weight"] * lin_vel[:, 2].square()
             + regularization["body_angular_velocity_weight"] * ang_vel[:, :2].square().sum(dim=1)
             + contact_weight * bad_contact

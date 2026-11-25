@@ -190,7 +190,11 @@ def compare(args):
         raise ValueError('Set transition_speed_levels in the test configuration')
     snapshots = [load_snapshot(p.with_name('run_config.json')) for p in args.checkpoints]
     speed_inputs = [cfg['task']['locomotion']['actor_true_forward_speed'] for cfg, _ in snapshots]
+    history_steps = [cfg['task']['locomotion']['actor_history_steps'] for cfg, _ in snapshots]
+    if len({steps for steps in history_steps if steps > 1}) > 1:
+        raise ValueError('Checkpoints with observation history must share the same actor_history_steps')
     settings['actor_true_forward_speed'] = any(speed_inputs)
+    settings['actor_history_steps'] = max(history_steps)
     run = snapshots[0][1]
     if any(meta['model_sha256'] != run['model_sha256'] or meta['task'] != 'locomotion' for _, meta in snapshots):
         raise ValueError('Checkpoint models must match')
@@ -198,8 +202,9 @@ def compare(args):
     env = LandingEnv(TRAINING_DIR / run['model'], len(cases) * (len(snapshots) + masked_count),
                      episode_seconds=APPROACH_S + STOP_S + 1, task_config=task)
     policies = []
-    for path, (settings, _), use_speed in zip(args.checkpoints, snapshots, speed_inputs, strict=True):
-        runner = OnPolicyRunner(env, runner_config(settings['ppo'], actor_true_forward_speed=use_speed),
+    for path, (settings, _), use_speed, steps in zip(args.checkpoints, snapshots, speed_inputs, history_steps, strict=True):
+        runner = OnPolicyRunner(env, runner_config(settings['ppo'], actor_true_forward_speed=use_speed,
+                                                   actor_history_steps=steps),
                                 device=str(env.device))
         load_checkpoint(runner, path, load_optimizer=False)
         policies.append(runner.get_inference_policy(device=env.device))

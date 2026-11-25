@@ -73,6 +73,16 @@ def _validate_scut_reward(reward):
 def _validate_settings(settings):
     task = settings["task"]
     _validate_scut_reward(task["scut_rough_reward"])
+    termination = task["termination"]
+    instant_pitch = termination["instant_pitch_deg"]
+    sustained_pitch = termination["sustained_pitch_deg"]
+    sustained_seconds = termination["sustained_pitch_seconds"]
+    if not isfinite(instant_pitch) or not 0.0 < instant_pitch <= 90.0:
+        raise ValueError("task.termination.instant_pitch_deg must be in (0, 90]")
+    if not isfinite(sustained_pitch) or not 0.0 < sustained_pitch <= instant_pitch:
+        raise ValueError("task.termination.sustained_pitch_deg must be in (0, instant_pitch_deg]")
+    if not isfinite(sustained_seconds) or sustained_seconds < 0.0:
+        raise ValueError("task.termination.sustained_pitch_seconds must be finite and nonnegative")
     if not isfinite(task["episode_seconds"]) or task["episode_seconds"] <= 0:
         raise ValueError("task.episode_seconds must be finite and positive")
     if not isfinite(task["friction"]) or task["friction"] < 0:
@@ -91,6 +101,11 @@ def _validate_settings(settings):
         raise ValueError("Terrain observations for the critic require enabled locomotion")
     if locomotion["actor_true_forward_speed"] and not locomotion["enabled"]:
         raise ValueError("True forward speed for the actor requires enabled locomotion")
+    history_steps = locomotion["actor_history_steps"]
+    if type(history_steps) is not int or not 1 <= history_steps <= 20:
+        raise ValueError("actor_history_steps must be an integer in [1, 20]")
+    if history_steps > 1 and not locomotion["enabled"]:
+        raise ValueError("Actor observation history requires enabled locomotion")
     heading_hold = locomotion["heading_hold"]
     if heading_hold["enabled"] and not locomotion["enabled"]:
         raise ValueError("Heading hold requires enabled locomotion")
@@ -316,13 +331,15 @@ def load_config(path=None):
         return _merge_config(tomllib.load(file))
 
 
-def runner_config(ppo, *, actor_true_forward_speed=False):
+def runner_config(ppo, *, actor_true_forward_speed=False, actor_history_steps=1):
     # RSL-RL removes class names and alters the configuration it receives.
     config = deepcopy(ppo)
     config.pop("max_action_std", None)
     config["obs_groups"] = {"policy": ["policy"], "critic": ["critic"]}
     if actor_true_forward_speed:
         config["obs_groups"]["policy"].append("body_forward_speed")
+    if actor_history_steps > 1:
+        config["obs_groups"]["policy"].append("policy_history")
     config["policy"]["class_name"] = "ActorCritic"
     config["algorithm"]["class_name"] = "PPO"
     return config

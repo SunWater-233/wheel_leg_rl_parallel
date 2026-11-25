@@ -111,6 +111,10 @@ def compare(args):
              if not (reverse and lanes.forward_only[lanes.variants + i])
              for speed in settings['command_speed_levels']]
     snapshots = [load_snapshot(path.with_name('run_config.json')) for path in args.checkpoints]
+    history_steps = [cfg['task']['locomotion']['actor_history_steps'] for cfg, _ in snapshots]
+    if len({steps for steps in history_steps if steps > 1}) > 1:
+        raise ValueError('Checkpoints with observation history must share the same actor_history_steps')
+    settings['actor_history_steps'] = max(history_steps)
     run = snapshots[0][1]
     if any(meta.get('model_sha256') != run['model_sha256'] or meta.get('task') != 'locomotion'
            for _, meta in snapshots):
@@ -118,8 +122,8 @@ def compare(args):
     env = WheelLegLocomotionEnv(TRAINING_DIR / run['model'], len(cases) * len(snapshots),
                                 episode_seconds=APPROACH_TIMEOUT_S + STOP_TIMEOUT_S + 1, task_config=task)
     policies = []
-    for checkpoint, (settings, _) in zip(args.checkpoints, snapshots, strict=True):
-        runner = OnPolicyRunner(env, runner_config(settings['ppo']), device=str(env.device))
+    for checkpoint, (settings, _), steps in zip(args.checkpoints, snapshots, history_steps, strict=True):
+        runner = OnPolicyRunner(env, runner_config(settings['ppo'], actor_history_steps=steps), device=str(env.device))
         load_checkpoint(runner, checkpoint, load_optimizer=False)
         policies.append(runner.get_inference_policy(device=env.device))
     outcomes = drive(env, policies, cases)

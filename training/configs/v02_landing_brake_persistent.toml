@@ -68,11 +68,11 @@ recovery_speed_weight = 0.65
 
 [ppo]
 save_interval = 25
-max_action_std = 0.035
+max_action_std = 0.045
 
 [ppo.algorithm]
-learning_rate = 0.00002
+learning_rate = 0.00003
 schedule = "fixed"
 num_learning_epochs = 4
-clip_param = 0.12
-entropy_coef = 0.0003
+clip_param = 0.15
+entropy_coef = 0.0005

@@ -60,9 +60,13 @@ def compare(args):
     snapshots = [load_snapshot(path.with_name("run_config.json")) for path in args.checkpoints]
     settings, saved = snapshots[0]
     speed_inputs = [cfg["task"]["locomotion"]["actor_true_forward_speed"] for cfg, _ in snapshots]
+    history_steps = [cfg["task"]["locomotion"]["actor_history_steps"] for cfg, _ in snapshots]
+    if len({steps for steps in history_steps if steps > 1}) > 1:
+        raise ValueError("Checkpoints with observation history must share the same actor_history_steps")
     task = settings["task"]
     locomotion = task["locomotion"]
     locomotion["actor_true_forward_speed"] = any(speed_inputs)
+    locomotion["actor_history_steps"] = max(history_steps)
     if not locomotion["enabled"]:
         raise ValueError("checkpoints must use the V0.2 locomotion task")
     low_speed, high_speed = task["forward_command"]
@@ -79,8 +83,9 @@ def compare(args):
     env = ObstacleCourse(TRAINING_DIR / saved["model"], len(args.checkpoints) * len(cases),
                          episode_seconds=12.0, task_config=task)
     policies = []
-    for checkpoint, use_speed in zip(args.checkpoints, speed_inputs, strict=True):
-        runner = OnPolicyRunner(env, runner_config(settings["ppo"], actor_true_forward_speed=use_speed),
+    for checkpoint, use_speed, steps in zip(args.checkpoints, speed_inputs, history_steps, strict=True):
+        runner = OnPolicyRunner(env, runner_config(settings["ppo"], actor_true_forward_speed=use_speed,
+                                                   actor_history_steps=steps),
                                 device=str(env.device))
         load_checkpoint(runner, checkpoint, load_optimizer=False)
         policies.append(runner.get_inference_policy(device=env.device))

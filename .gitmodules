@@ -1,0 +1,3 @@
+[submodule "deploy/wheel_leg_deploy"]
+	path = deploy/wheel_leg_deploy
+	url = https://git.015609.best/control/wheel_leg_deploy.git

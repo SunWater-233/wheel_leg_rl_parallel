@@ -18,7 +18,7 @@
   ],
   "policy_to_firmware_index": [0, 2, 1, 3, 4, 5],
   "joint_sign": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-  "leg_zero_offset_rad": [0.0, 0.0, 0.0, 0.0],
+  "leg_zero_offset_rad": [-0.5823, -0.5823, -0.5830, -0.5830],
   "leg_height_source": "mcu",
   "apply_leg_bias": true,
   "apply_friction_circle": true,

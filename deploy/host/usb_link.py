@@ -123,7 +123,7 @@ class UsbLink:
         self._tx_seq = 0
         self._tx_frames = 0
         self._tx_errors = 0
-        self._start_ns = time.monotonic_ns()
+        self._start_ns = time.perf_counter_ns()
         self._connected = True
         self._last_error: str | None = None
         self._stop_event = threading.Event()
@@ -133,7 +133,7 @@ class UsbLink:
         if self._rx_thread is not None and self._rx_thread.is_alive():
             return
         self._stop_event.clear()
-        self._start_ns = time.monotonic_ns()
+        self._start_ns = time.perf_counter_ns()
         self._rx_thread = threading.Thread(target=self._rx_loop, name="usb-cdc-rx", daemon=True)
         self._rx_thread.start()
 
@@ -155,7 +155,7 @@ class UsbLink:
                 waiting = self._transport.in_waiting
                 count = min(max(waiting, 1), 4096)
                 chunk = self._transport.read(count)
-                rx_ns = time.monotonic_ns()
+                rx_ns = time.perf_counter_ns()
             except Exception as exc:
                 self._connected = False
                 self._last_error = f"RX error: {exc}"
@@ -198,7 +198,7 @@ class UsbLink:
         """
         with self._tx_lock:
             seq = self._tx_seq & UINT32_MASK
-            ts_ms = int((time.monotonic_ns() - self._start_ns) // 1_000_000) & UINT32_MASK
+            ts_ms = int((time.perf_counter_ns() - self._start_ns) // 1_000_000) & UINT32_MASK
             packet = build_rl_command(
                 seq=seq,
                 timestamp_ms=ts_ms,

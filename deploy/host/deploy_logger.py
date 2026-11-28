@@ -158,7 +158,7 @@ class DeployLogger:
         self.leg_limit = float(leg_torque_limit)
         self.wheel_limit = float(wheel_torque_limit)
         self.record_raw_bin = bool(record_raw_bin)
-        self.t0_ns = time.monotonic_ns()
+        self.t0_ns = time.perf_counter_ns()
         self.started_iso = datetime.now().isoformat(timespec="seconds")
 
         self._queue: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=queue_capacity)
@@ -267,7 +267,7 @@ class DeployLogger:
         self._enqueue("ctrl", item)
 
     def log_event(self, kind: str, message: str, t_s: float | None = None) -> None:
-        t = (time.monotonic_ns() - self.t0_ns) * 1e-9 if t_s is None else float(t_s)
+        t = (time.perf_counter_ns() - self.t0_ns) * 1e-9 if t_s is None else float(t_s)
         self._enqueue("event", (t, kind, message))
 
     def close(self, link_stats: dict[str, Any] | None = None) -> dict[str, Any]:

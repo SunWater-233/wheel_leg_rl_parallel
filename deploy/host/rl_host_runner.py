@@ -23,6 +23,33 @@ from policy_runtime import CalibrationConfig, PolicyBundle, WheelLegPolicyContro
 from usb_link import ByteTransport, SerialPortTransport, UsbLink  # noqa: E402
 
 
+class _HighResTimer:
+    """Request 1 ms Windows multimedia timer resolution (no-op elsewhere)."""
+
+    def __init__(self) -> None:
+        self._winmm = None
+
+    def __enter__(self) -> "_HighResTimer":
+        if sys.platform == "win32":
+            try:
+                import ctypes  # local import so sandboxed tests never fail
+
+                winmm = ctypes.WinDLL("winmm")
+                if winmm.timeBeginPeriod(1) == 0:
+                    self._winmm = winmm
+            except Exception:
+                self._winmm = None
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._winmm is not None:
+            try:
+                self._winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+            self._winmm = None
+
+
 def _sleep_until_ns(target_ns: int) -> None:
     while True:
         remaining_ns = target_ns - time.perf_counter_ns()
@@ -69,86 +96,87 @@ def run_host_loop(
     zeros = (0.0,) * 6
 
     try:
-        while True:
-            now_perf = time.perf_counter_ns()
-            elapsed_s = (now_perf - start_perf) * 1e-9
-            if duration_s > 0.0 and elapsed_s >= duration_s:
-                break
+        with _HighResTimer():
+            while True:
+                now_perf = time.perf_counter_ns()
+                elapsed_s = (now_perf - start_perf) * 1e-9
+                if duration_s > 0.0 and elapsed_s >= duration_s:
+                    break
 
-            loop_dt_ms = (now_perf - prev_tick_ns) * 1e-6 if step_idx > 0 else bundle.control_dt * 1e3
-            prev_tick_ns = now_perf
+                loop_dt_ms = (now_perf - prev_tick_ns) * 1e-6 if step_idx > 0 else bundle.control_dt * 1e3
+                prev_tick_ns = now_perf
 
-            obs, _ = link.get_latest_observation()
-            now_mono_ns = time.monotonic_ns()
+                obs, _ = link.get_latest_observation()
+                now_rx_clock_ns = time.perf_counter_ns()
 
-            if obs is None:
-                # No observation yet: keep sending zero-torque heartbeat if link alive
-                link.send_command(
-                    torque=zeros,
-                    kp=zeros,
-                    kd=zeros,
-                    q_ref=zeros,
-                    v_ref=zeros,
-                    source_seq=0,
-                    source_timestamp_ms=0,
-                    rl_flags=RL_FLAG_ZERO_TORQUE,
-                )
-            else:
-                obs_age_ms = max(0.0, (now_mono_ns - obs.received_monotonic_ns) * 1e-6)
-                stale = obs_age_ms > obs_stale_ms
-                result = controller.step(obs, dt=bundle.control_dt)
-                tx_flag = RL_FLAG_ZERO_TORQUE if stale else result.rl_flags_tx
-                if stale:
-                    controller.reset_for_handover(obs)
-
-                cmd_seq, _, tx_ok = link.send_command(
-                    torque=result.torque_ff_fw,
-                    kp=result.kp_fw,
-                    kd=result.kd_fw,
-                    q_ref=result.q_ref_fw,
-                    v_ref=result.v_ref_fw,
-                    source_seq=obs.seq,
-                    source_timestamp_ms=obs.timestamp_ms,
-                    rl_flags=tx_flag,
-                )
-
-                logger.log_control_step(
-                    ControlLogItem(
-                        t_s=elapsed_s,
-                        step=step_idx,
-                        obs=obs,
-                        result=result,
-                        cmd_seq=cmd_seq,
-                        cmd_tx_ok=tx_ok,
-                        obs_age_ms=obs_age_ms,
-                        loop_dt_ms=loop_dt_ms,
+                if obs is None:
+                    # No observation yet: keep sending zero-torque heartbeat if link alive
+                    link.send_command(
+                        torque=zeros,
+                        kp=zeros,
+                        kd=zeros,
+                        q_ref=zeros,
+                        v_ref=zeros,
+                        source_seq=0,
+                        source_timestamp_ms=0,
+                        rl_flags=RL_FLAG_ZERO_TORQUE,
                     )
-                )
-                step_idx += 1
+                else:
+                    obs_age_ms = max(0.0, (now_rx_clock_ns - obs.received_monotonic_ns) * 1e-6)
+                    stale = obs_age_ms > obs_stale_ms
+                    result = controller.step(obs, dt=bundle.control_dt)
+                    tx_flag = RL_FLAG_ZERO_TORQUE if stale else result.rl_flags_tx
+                    if stale:
+                        controller.reset_for_handover(obs)
 
-                if print_status and elapsed_s >= next_status_s:
-                    st = link.stats()
-                    rx_hz = st.rx_frames / max(elapsed_s, 1e-3)
-                    faults = ",".join(decode_fault_flags(obs.fault_flags)) or "NONE"
-                    print(
-                        f"t={elapsed_s:6.1f}s mode={mode_name(obs.chassis_mode):<6} "
-                        f"rl={obs.rl_flags}->{tx_flag} "
-                        f"pitch={result.pitch_deg:+5.1f}° roll={result.roll_deg:+5.1f}° "
-                        f"h_mcu=({result.leg_height_mcu[0]:.3f},{result.leg_height_mcu[1]:.3f}) "
-                        f"h_cad=({result.leg_height_cad[0]:.3f},{result.leg_height_cad[1]:.3f}) "
-                        f"rx={rx_hz:5.1f}Hz loss={st.loss_percent:4.2f}% "
-                        f"infer={result.infer_ms:4.2f}ms dt={loop_dt_ms:4.1f}ms "
-                        f"fault={faults}",
-                        flush=True,
+                    cmd_seq, _, tx_ok = link.send_command(
+                        torque=result.torque_ff_fw,
+                        kp=result.kp_fw,
+                        kd=result.kd_fw,
+                        q_ref=result.q_ref_fw,
+                        v_ref=result.v_ref_fw,
+                        source_seq=obs.seq,
+                        source_timestamp_ms=obs.timestamp_ms,
+                        rl_flags=tx_flag,
                     )
-                    next_status_s = elapsed_s + 1.0
 
-            if not link.stats().connected:
-                logger.log_event("LINK_LOST", f"USB link disconnected: {link.stats().last_error}", t_s=elapsed_s)
-                break
+                    logger.log_control_step(
+                        ControlLogItem(
+                            t_s=elapsed_s,
+                            step=step_idx,
+                            obs=obs,
+                            result=result,
+                            cmd_seq=cmd_seq,
+                            cmd_tx_ok=tx_ok,
+                            obs_age_ms=obs_age_ms,
+                            loop_dt_ms=loop_dt_ms,
+                        )
+                    )
+                    step_idx += 1
 
-            next_tick_ns = max(time.perf_counter_ns() - period_ns, next_tick_ns + period_ns)
-            _sleep_until_ns(next_tick_ns)
+                    if print_status and elapsed_s >= next_status_s:
+                        st = link.stats()
+                        rx_hz = st.rx_frames / max(elapsed_s, 1e-3)
+                        faults = ",".join(decode_fault_flags(obs.fault_flags)) or "NONE"
+                        print(
+                            f"t={elapsed_s:6.1f}s mode={mode_name(obs.chassis_mode):<6} "
+                            f"rl={obs.rl_flags}->{tx_flag} "
+                            f"pitch={result.pitch_deg:+5.1f}° roll={result.roll_deg:+5.1f}° "
+                            f"h_mcu=({result.leg_height_mcu[0]:.3f},{result.leg_height_mcu[1]:.3f}) "
+                            f"h_cad=({result.leg_height_cad[0]:.3f},{result.leg_height_cad[1]:.3f}) "
+                            f"rx={rx_hz:5.1f}Hz loss={st.loss_percent:4.2f}% "
+                            f"infer={result.infer_ms:4.2f}ms dt={loop_dt_ms:4.1f}ms "
+                            f"fault={faults}",
+                            flush=True,
+                        )
+                        next_status_s = elapsed_s + 1.0
+
+                if not link.stats().connected:
+                    logger.log_event("LINK_LOST", f"USB link disconnected: {link.stats().last_error}", t_s=elapsed_s)
+                    break
+
+                next_tick_ns = max(time.perf_counter_ns() - period_ns, next_tick_ns + period_ns)
+                _sleep_until_ns(next_tick_ns)
     except KeyboardInterrupt:
         logger.log_event("USER_STOP", "Ctrl+C received, sending zero-torque burst")
     finally:

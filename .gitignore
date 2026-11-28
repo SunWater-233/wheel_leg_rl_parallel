@@ -8,6 +8,8 @@ __pycache__/
 
 # Training checkpoints, logs, and rendered videos
 /training/outputs/
+/deploy/host/bundles/
+/deploy/host/logs/
 
 # SolidWorks export caches and local model backups
 /training/assets/**/.swdescribe-automation-output.json

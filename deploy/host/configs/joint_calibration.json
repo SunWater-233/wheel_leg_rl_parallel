@@ -1,0 +1,40 @@
+{
+  "_comment": "STM32H7 chassis_motors[0..5] <-> V0.2 policy [hip_L, hip_R, hipknee_L, hipknee_R, wheel_L, wheel_R] mapping & calibration.",
+  "_firmware_order": [
+    "0: left_phi1 (DM8009)",
+    "1: left_phi4 (DM8009)",
+    "2: right_phi1 (DM8009, reversed=true)",
+    "3: right_phi4 (DM8009, reversed=true)",
+    "4: left_wheel (DMS3519)",
+    "5: right_wheel (DMS3519, reversed=true)"
+  ],
+  "_policy_order": [
+    "0: hip_L (thigh)",
+    "1: hip_R (thigh)",
+    "2: hipknee_L (knee pushrod)",
+    "3: hipknee_R (knee pushrod)",
+    "4: wheel_L",
+    "5: wheel_R"
+  ],
+  "policy_to_firmware_index": [0, 2, 1, 3, 4, 5],
+  "joint_sign": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+  "leg_zero_offset_rad": [0.0, 0.0, 0.0, 0.0],
+  "leg_height_source": "mcu",
+  "apply_leg_bias": true,
+  "apply_friction_circle": true,
+  "heading_hold": {
+    "enabled": false,
+    "gain": 2.5,
+    "deadband_deg": 0.5,
+    "max_yaw_rate": 0.4
+  },
+  "pd_gains": {
+    "leg_kp": [100.0, 100.0, 100.0, 100.0],
+    "leg_kd": [4.0, 4.0, 4.0, 4.0],
+    "wheel_kd": [0.6, 0.6]
+  },
+  "torque_limits_nm": {
+    "leg": 40.0,
+    "wheel": 5.0
+  }
+}

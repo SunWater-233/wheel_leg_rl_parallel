@@ -13,10 +13,10 @@ from robots.wheel_leg_locomotion import WheelLegLocomotionEnv
 class TerrainPreviewTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        config = load_config(TRAINING_DIR / 'configs/v02_complex_terrain_bars_finetune.toml')
+        config = load_config(TRAINING_DIR / 'configs/archive/v02_complex_terrain_bars_finetune.toml')
         cls.lanes = ScutGroundLanes(config['task']['locomotion'])
 
-    @patch('envs.terrain.gs.morphs.Terrain', side_effect=lambda **kwargs: kwargs)
+    @patch('tasks.terrains.lanes.gs.morphs.Terrain', side_effect=lambda **kwargs: kwargs)
     def test_preview_keeps_height_samples_at_the_original_world_coordinates(self, _terrain):
         lanes = self.lanes
         width = round(lanes.lane_width / lanes.spacing)
@@ -37,7 +37,7 @@ class TerrainPreviewTest(unittest.TestCase):
                                               lanes.field[:, lane * width:(lane + 1) * width + 1])
                 self.assertLess(preview['height_field'].shape[1], lanes.field.shape[1])
 
-    @patch('envs.terrain.gs.morphs.Terrain', side_effect=lambda **kwargs: kwargs)
+    @patch('tasks.terrains.lanes.gs.morphs.Terrain', side_effect=lambda **kwargs: kwargs)
     def test_default_morph_still_uses_the_full_course(self, _terrain):
         lanes = self.lanes
         full = lanes.morph(False)

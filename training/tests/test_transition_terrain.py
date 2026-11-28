@@ -9,7 +9,7 @@ from envs.terrain import TransitionLanes
 class TransitionTerrainTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.config = load_config(TRAINING_DIR / "configs/v02_random_transitions.toml")
+        cls.config = load_config(TRAINING_DIR / "configs/archive/v02_random_transitions.toml")
         cls.settings = cls.config["task"]["locomotion"]
         cls.lanes = TransitionLanes(cls.settings)
 

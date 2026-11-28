@@ -131,10 +131,12 @@ enabled = false # 是否启用物理参数随机化
 nominal_probability = 0.25 # 启用随机化后，仍使用标称物理参数的环境比例
 contact_friction = [0.50, 0.65, 0.80, 0.95] # 随机抽取的接触摩擦系数档位
 body_mass_scale = [0.95, 1.10] # 车身质量相对标称值的倍率范围
-spring_force_scale = [1.0, 1.0] # 气弹簧标称推力的倍率范围
+com_jitter_xyz = [0.0, 0.0, 0.0] # 独立于质量缩放的车身质心三轴随机偏移上限，单位为米
+spring_force_scale = [1.0, 1.0] # 气弹簧标称推力的倍率范围（左右独立采样）
 leg_kp_scale = [1.0, 1.0]       # 主动腿关节位置刚度 Kp 的倍率范围
 leg_kv_scale = [1.0, 1.0]       # 主动腿关节速度阻尼 Kv 的倍率范围
 wheel_kv_scale = [1.0, 1.0]     # 驱动轮速度伺服增益 Kv 的倍率范围
+wheel_armature_scale = [1.0, 1.0] # 驱动轮等效转子反射惯量的倍率范围
 load_offsets = [
     [
         -0.12,
@@ -190,7 +192,11 @@ actor_true_forward_speed = false # Diagnostic only: expose simulated body-frame 
 actor_history_steps = 1           # 策略观测堆叠的历史帧数（1 表示仅当前帧，>1 表示当前帧 + 过去 N-1 帧本体历史）
 leg_torque_limit = 12.0           # 单个主动腿关节的力矩上限，单位为牛·米
 wheel_torque_limit = 5.0          # 单侧轮端伺服的力矩上限，单位为牛·米
+wheel_armature = 0.0              # 轮端电机转子经减速箱折算到轮轴的等效转动惯量 (kg·m²)，0 表示沿用默认 1e-4
+leg_target_delay_steps = [0, 0]   # 主动腿目标位置指令延迟范围，按 2 ms 物理步计，范围 0-19
 wheel_target_delay_steps = 0      # 轮速目标延迟，按 2 ms 物理步计，最大 9 步
+wheel_target_delay_steps_range = [] # 轮速目标按回合随机延迟范围 [min, max]（按 2 ms 步计，0-19）；留空时沿用 wheel_target_delay_steps
+imu_obs_delay_steps = [0, 0]      # 策略 IMU 观测（角速度与重力投影）延迟范围，按 2 ms 物理步计，范围 0-9
 height_range = [0.17, 0.20]       # 腿高指令范围，按髋关节到轮心的竖直距离计算，单位为米
 obstacle_height_range = []        # 非平地障碍赛道的腿高采样范围，留空时复用 height_range
 hard_obstacle_height_range = []   # 高难凸条与台阶赛道的腿高采样范围，留空时复用 obstacle_height_range

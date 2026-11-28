@@ -160,7 +160,7 @@ class ActorHistoryTest(unittest.TestCase):
         self.assertNotEqual(obs1_pre["policy_history"].data_ptr(), env.policy_history.data_ptr())
 
     def test_history_config_validation_and_toml(self):
-        cfg = load_config(TRAINING_DIR / "configs/v02_history5_complex_finetune.toml")
+        cfg = load_config(TRAINING_DIR / "configs/archive/v02_history5_complex_finetune.toml")
         self.assertEqual(cfg["task"]["locomotion"]["actor_history_steps"], 5)
         self.assertEqual(
             runner_config(cfg["ppo"], actor_history_steps=5)["obs_groups"]["policy"],

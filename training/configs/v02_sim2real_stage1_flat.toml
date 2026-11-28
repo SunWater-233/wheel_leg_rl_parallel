@@ -1,0 +1,183 @@
+# Sim2Real Stage 1 (Flat-ground robust locomotion with real-hardware delays, inertia & asymmetric DR):
+# Use either:
+#   - From scratch (1600-1800 iters) as the Stage 1 foundation before v02_sim2real_stage2_robust.toml
+#   - Or fast flat-only Sim2Real fine-tune (600-800 iters with --init-checkpoint) for immediate flat/rack testing.
+[task]
+episode_seconds = 24.0
+use_cad_base_hull = true
+forward_command = [-2.5, 2.5]
+yaw_command = [-10.0, 10.0]
+
+[task.observation_noise]
+gyro = 0.08
+gravity = 0.025
+joint_position = 0.015
+joint_velocity = 0.8
+
+[task.locomotion]
+enabled = true
+critic_terrain_observations = true
+actor_history_steps = 5
+leg_torque_limit = 40.0
+wheel_torque_limit = 5.0
+wheel_armature = 0.005
+leg_target_delay_steps = [4, 9]
+wheel_target_delay_steps = 5
+wheel_target_delay_steps_range = [5, 11]
+imu_obs_delay_steps = [1, 4]
+height_range = [0.17, 0.33]
+height_lowering_schedule = [
+    [0, 0.28],
+    [100, 0.24],
+    [220, 0.20],
+    [360, 0.17],
+]
+height_max_probability = 0.15
+height_rate = 0.35
+height_acceleration = 1.20
+command_seconds = [3.0, 6.5]
+direct_velocity_commands = true
+manual_forward_acceleration = 4.0
+terrain = "plane"
+
+[task.locomotion.heading_hold]
+enabled = true
+
+[task.locomotion.low_recovery]
+flat_episode_fraction = 0.08
+
+[task.locomotion.special_mode_commands]
+enabled = true
+rel_standing_envs = 0.20
+rel_zero_yaw_envs = 0.25
+resampling_time_range = [2.5, 6.0]
+min_episode_time = 2.0
+require_stable = true
+stable_gravity_xy_max = 0.35
+stable_lin_vel_max = 3.0
+stable_ang_vel_max = 10.0
+normal_forward_range = [-2.5, 2.5]
+normal_yaw_range = [-4.5, 4.5]
+
+[[task.locomotion.special_mode_commands.modes]]
+name = "dash"
+rel_envs = 0.28
+iteration_start = 250
+iteration_end = -1
+lin_vel_x = [[-2.5, -1.8], [1.8, 2.5]]
+ang_vel_z = [[-4.5, 4.5]]
+
+[[task.locomotion.special_mode_commands.modes]]
+name = "spin_low"
+rel_envs = 0.14
+iteration_start = 400
+iteration_end = -1
+lin_vel_x = [[-0.1, 0.1]]
+ang_vel_z = [[-7.0, -4.5], [4.5, 7.0]]
+
+[[task.locomotion.special_mode_commands.modes]]
+name = "spin_mid"
+rel_envs = 0.12
+iteration_start = 650
+iteration_end = -1
+lin_vel_x = [[-0.1, 0.1]]
+ang_vel_z = [[-10.0, -7.0], [7.0, 10.0]]
+
+[task.locomotion.events]
+enabled = true
+push_interval_seconds = [5.0, 9.0]
+push_vel_xy = 0.22
+push_ang_vel_xy = 0.35
+wrench_interval_seconds = [4.0, 8.0]
+external_force_xyz = [8.0, 8.0, 5.0]
+external_torque_xyz = [1.0, 1.0, 0.6]
+wrench_zero_probability = 0.40
+reset_roll_pitch_rad = 0.18
+reset_yaw_rad = 0.20
+reset_joint_pos_rad = 0.08
+reset_lin_vel = 0.20
+reset_ang_vel = 0.45
+air_drop_flat_fraction = 0.0
+
+[task.domain_randomization]
+enabled = true
+nominal_probability = 0.15
+contact_friction = [0.50, 0.65, 0.80, 0.95, 1.15]
+body_mass_scale = [0.90, 1.25]
+com_jitter_xyz = [0.02, 0.02, 0.02]
+spring_force_scale = [0.40, 1.15]
+leg_kp_scale = [0.60, 1.15]
+leg_kv_scale = [0.75, 1.35]
+wheel_kv_scale = [0.50, 1.15]
+wheel_armature_scale = [0.50, 1.60]
+
+[task.domain_randomization.hips]
+frictionloss_delta = [0.0, 0.25]
+damping_delta = [0.0, 0.10]
+
+[task.domain_randomization.wheels]
+frictionloss_delta = [0.0, 0.10]
+damping_delta = [0.0, 0.12]
+
+[task.scut_rough_reward.tracking]
+forward_deadband = 0.025
+yaw_deadband = 0.05
+forward_reward_weight = 2.5
+forward_error_width = 0.25
+forward_error_clip = 2.0
+forward_error_scale = 0.50
+vel_height_gate_enabled = true
+vel_height_gate_full_error = 0.03
+vel_height_gate_zero_error = 0.08
+yaw_reward_weight = 1.6
+yaw_error_width = 0.40
+yaw_error_clip = 2.5
+yaw_error_scale = 0.18
+pitch_penalty_weight = 2.60
+pitch_width = 0.016
+ground_pitch_error_weight = 0.70
+ground_pitch_rate_weight = 0.12
+roll_penalty_weight = 3.00
+roll_width = 0.008
+flat_roll_error_weight = 0.65
+flat_roll_rate_weight = 0.15
+height_reward_weight = 1.6
+height_error_width = 0.0015
+height_error_scale = 12.0
+
+[task.scut_rough_reward.motion]
+action_delta_weight = 0.012
+leg_action_curvature_weight = 0.016
+wheel_action_curvature_weight = 0.008
+leg_velocity_weight = 0.0020
+wheel_acceleration_weight = 2e-6
+wheel_gap_threshold_weight = 1.2
+wheel_gap_scale = 5.5
+
+[task.scut_rough_reward.regularization]
+torque_weight = 4e-5
+vertical_velocity_weight = 1.0
+body_angular_velocity_weight = 0.16
+
+[task.scut_rough_reward.braking]
+enabled = false
+
+[ppo]
+save_interval = 100
+max_action_std = 0.0
+init_checkpoint_min_std = 0.25
+
+[ppo.policy]
+actor_hidden_dims = [256, 128, 64]
+critic_hidden_dims = [256, 128, 64]
+activation = "elu"
+init_noise_std = 0.8
+
+[ppo.algorithm]
+learning_rate = 0.0001
+schedule = "adaptive"
+desired_kl = 0.01
+num_learning_epochs = 5
+num_mini_batches = 4
+clip_param = 0.2
+entropy_coef = 0.003

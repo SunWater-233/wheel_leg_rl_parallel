@@ -1,270 +1,158 @@
-# 自研轮腿 V0.2 · Genesis 训练
+# 自研轮腿 V0.2 · Genesis 并行强化学习训练
 
-默认加载自研模型的 [wheel_leg_ground.xml](assets/wheel_leg_xml_V0.2/wheel_leg_ground.xml)。训练统一使用 [华南虎 V14 Rough-v1 reward 的 Genesis 移植](robots/scut_rough_reward.py)。连续腿高任务使用完整的 reward，固定高度平地任务使用其中的地面项。V0.2 按 CAD 原件导入质量、惯量、关节限位和 6 处闭链，每处闭链由一对 `connect` 约束实现。训练以 500 Hz 步进物理、50 Hz 更新控制。
+基于 Genesis GPU 并行物理仿真与 RSL-RL PPO 的轮腿机器人训练框架，默认加载自研模型 [wheel_leg_ground.xml](assets/wheel_leg_xml_V0.2/wheel_leg_ground.xml)（500 Hz 物理步进 / 50 Hz 策略控制，6 处闭链由 12 条 `connect` 约束实现）。
 
-V0.2 的站立复位姿态让双轮轴位于重心下方。动作依次控制 `hip_L`、`hip_R`、`hipknee_L`、`hipknee_R` 的位置和 `wheel_L`、`wheel_R` 的转速，右侧镜像轴的符号由环境处理。膝关节由连杆驱动，气弹簧沿原模型轴施加 200 N，四个腿部驱动默认沿用原模型的 ±12 N·m 限幅。连续腿高任务可用 `task.locomotion.leg_torque_limit` 调整单关节限矩。轮端限矩 ±5 N·m、PD 参数和被动关节阻尼是仿真假设。
+动作空间依次控制 `hip_L`、`hip_R`、`hipknee_L`、`hipknee_R` 的目标位置和 `wheel_L`、`wheel_R` 的目标角速度，右侧镜像符号由环境统一处理；策略观测默认采用 28D 本体状态（支持 `actor_history_steps` 历史帧堆叠与非对称 Critic 地形/线速度观测）。
 
-批量仿真用按 CAD 拟合的轮胎和导轮圆柱，以及其余刚体的包围盒，平地场景关闭自碰撞。原始 CAD 文件供回放绘图。
+---
 
 ## 项目结构
 
 ```text
 training/
-├── main.py              # train 和 demo 入口
-├── assets/              # 机器人 MJCF、CAD 网格和授权
-├── robots/              # 自研 V0.2 和 SCUT 模型的姿态、关节映射与驱动参数
-├── envs/flat.py         # 并行仿真、指令、观测、奖励、终止和重置
-├── configs/flat.toml    # 平地任务和 PPO 默认配置
-├── tools/               # 资产转换、回放渲染和训练画面
-└── outputs/             # 本地实验配置、TensorBoard 日志、权重与视频
+├── main.py                  # CLI 入口（train / demo 参数解析与分发）
+├── pyproject.toml           # uv 依赖与镜像配置
+├── assets/                  # V0.2 / SCUT MJCF、CAD 网格与授权
+├── configs/
+│   ├── flat.toml            # 全局默认配置（所有可覆写参数的基线 schema）
+│   ├── v02_sim2real_stage1_flat.toml     # Sim2Real 一阶段（平地 + 延迟 + 域随机化）
+│   ├── v02_sim2real_stage2_robust.toml   # Sim2Real 二阶段（复杂地形 + 课程 + 外部扰动）
+│   ├── v02_scut_stage1_flat_speed.toml   # SCUT 对齐一阶段（平地敏捷速度/小陀螺）
+│   ├── v02_scut_stage2_terrain.toml      # SCUT 对齐二阶段（全地形贴地跑场）
+│   ├── archive/             # 历史实验与消融配置归档
+│   └── schema/              # TOML 加载（支持 extends 继承）、校验与 run_config.json 快照
+├── robots/                  # 纯机器人硬件抽象（无任务/奖励耦合）
+│   ├── v02/                 # spec.py 单一常量源、Genesis 适配器、闭链姿态求解、固件自起移植
+│   └── scut/                # SCUT Wheelbipe V14.2 参考适配器
+├── tasks/                   # RL 环境与可组合任务模块
+│   ├── base_env.py          # FlatEnv（VecEnv 步进、动作/IMU 延迟缓冲、姿态终止）
+│   ├── locomotion_env.py    # WheelLegLocomotionEnv 编排器
+│   ├── terrains/            # 混合/SCUT/过渡高度场与视觉材质
+│   ├── commands/            # SpecialMode / 地形指令 / 航向锁 / 摩擦圆 / 旧版机动
+│   ├── rewards/             # 华南虎 V14 Rough-v1 奖励与制动俯仰代价
+│   ├── randomization/       # 动力学域随机化与外部扰动事件（push/wrench/air_drop）
+│   ├── observations.py      # 观测拼装、传感器噪声、IMU 延迟与历史帧
+│   ├── recovery.py          # 低位断电落地恢复训练子任务
+│   └── metrics.py           # 回合指标统计与自适应地形课程
+├── rl/                      # 训练与策略推理核心（runner / checkpoint / trainer / evaluator）
+├── eval/                    # 验收评测套件（共享 harness + 过坎/平地升降/复杂地形/过渡制动等）
+├── viz/                     # 实时网页监控、Genesis 键鼠驾驶、斜坡规划、视频录制与 sim_logger
+├── scripts/                 # Colab 一体化远程训练脚本（colab_train.*）、资产转换与旧脚本归档
+├── tests/                   # 单元测试（unittest）
+├── envs/ & tools/           # 向后兼容 re-export 壳（旧命令与旧 import 保持可用）
+└── outputs/                 # 本地训练产物、checkpoint、TensorBoard 日志与回放视频（不入库）
 ```
 
-## 运行 demo
+---
 
-以下命令在 `wheel_leg_rl_parallel/training` 下运行。
+## 快速开始
+
+以下命令在 `wheel_leg_rl_parallel/training` 下执行：
 
 ```powershell
 uv sync --locked
+
+# 1. 脚本控制器冒烟 + 录制 CAD 网格视频
 uv run --locked main.py demo --num-envs 4 --seconds 5 --video outputs/wheel_leg_v02.mp4
+
+# 2. 运行全部单元测试
+uv run --locked python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-默认用脚本控制器从静止切换到 0.35 m/s 前进命令。终端输出速度、位移、重置次数和双轮接地步数。视频用原始 CAD 网格绘制 Genesis 记录的第一台机器人状态。加 `--viewer` 可在 Genesis 实时查看碰撞几何。初次运行可能需要编译 GPU 内核。
+---
 
-## V0.2 连续腿高训练
+## 主线训练流程（Sim2Real）
 
-以下命令在 `training` 下运行。新任务从空白权重起步，腿部限矩为 ±40 N·m。闭链姿态用髋关节中心到轮轴中心的垂向距离换算，奖励跟踪车身参考点的离地高度。`v02_low` 先在 33 cm 腿高低速训练，前 80 个 PPO 迭代保持 33 cm。之后把采样下限逐步降到第 160 轮的 30 cm、第 280 轮的 25 cm、第 450 轮的 20 cm，以及第 600 轮的 17 cm。新目标仍可采到较高腿位，回合内按腿高变化率连续过渡。恢复训练时沿用 checkpoint 的迭代编号。
-
-`v02_low` 有 45% 的驻车回合，保持初始腿高和零运动指令。回放验收时测零指令下的轮速和车身漂移。
+### 本机训练与续训
 
 ```powershell
-uv sync --locked
-uv run --locked main.py train --config configs/v02_low.toml --num-envs 128 --iterations 30 --output outputs/v02_low_check
-uv run --locked main.py train --config configs/v02_low.toml --num-envs 1024 --iterations 1000 --output outputs/v02_low --live-port 6007
+# 一阶段：平地敏捷 + 执行器/IMU 延迟 + 域随机化
+uv run --locked main.py train --config configs/v02_sim2real_stage1_flat.toml --num-envs 1024 --iterations 800 --output outputs/v02_sim2real_stage1 --live-port 6007
+
+# 二阶段：从一阶段权重热启动（--init-checkpoint 使用新优化器，自动零填充新增维度）
+uv run --locked main.py train --config configs/v02_sim2real_stage2_robust.toml --init-checkpoint outputs/v02_sim2real_stage1/model_800.pt --num-envs 1536 --iterations 1200 --output outputs/v02_sim2real_stage2 --live-port 6007 --live-stream --live-fps 8
+
+# 断点续训（保留优化器与迭代编号，自动读取同目录 run_config.json）
+uv run --locked main.py train --resume outputs/v02_sim2real_stage2/model_500.pt --iterations 500 --output outputs/v02_sim2real_stage2_resume
 ```
 
-回放检查 `33 → 25 → 20 → 17 cm`。也可以加上 `--yaw 0.25` 在转向时检查。原生 Genesis 键盘回放中，按住 `Z/X` 可连续抬高或降低目标。
+配置文件支持 `extends = "base_name.toml"` 继承同目录或 `training/` 相对路径的父配置，只需写差异项；每次训练仍会将展平后的完整配置写入 `outputs/<run>/run_config.json`，保证部署导出与复现兼容。
+
+### Colab 远程训练与本机监控（`colab_train.*`）
+
+通过 WSL `google-colab-cli` 封装 GPU 申请、本地未提交改动覆盖、权重上传、`uv sync`、单元测试、`tmux` 后台训练与防 HTTP 429 自动重连端口转发（脚本位于 [scripts/colab_train.cmd](scripts/colab_train.cmd)，`tools/colab_train.cmd` 保留兼容转发）：
 
 ```powershell
-uv run --locked main.py demo --checkpoint outputs/v02_low/model_999.pt --num-envs 1 --speed 0.35 --height-sequence 0.33 0.25 0.20 0.17 --height-hold 2
+# 1. 一键分配 GPU、同步代码、跑单测、启动训练并转发监控到本机浏览器
+.\training\scripts\colab_train.cmd up --session wheel-leg-s2r --gpus "L4 A100 T4" --config configs/v02_sim2real_stage2_robust.toml --num-envs 2048 --iterations 1200 --init-ckpt training/outputs/v02_scut_stage2_scut_aligned/model_1600.pt
+
+# 2. 单独开启/重连监控转发：http://127.0.0.1:8765/ (实时画面) 与 http://127.0.0.1:6006/ (TensorBoard)
+.\training\scripts\colab_train.cmd tunnel --session wheel-leg-s2r
+
+# 3. 查看远端 GPU、tmux、checkpoint 列表与日志尾部
+.\training\scripts\colab_train.cmd status --session wheel-leg-s2r
+
+# 4. 拉回最新（或指定）checkpoint 与 run_config.json 到本地 training/outputs/
+.\training\scripts\colab_train.cmd pull --session wheel-leg-s2r --run-name v02_sim2real_stage2_robust
+
+# 5. 查看算力余额 / 停止实例释放计费
+.\training\scripts\colab_train.cmd usage
+.\training\scripts\colab_train.cmd stop --session wheel-leg-s2r
 ```
 
-TensorBoard 记录 `Episode/body_height_mae_cm`、`Episode/forward_mae_m_s`、`Episode/fall_rate` 和 `Episode/leg_saturation_rate`。确认低腿位站稳、启停及高度切换后，再逐步提高平地速度，每次从上一档通过验证的权重初始化。`--init-checkpoint` 加载相同观测结构的权重，并重新初始化优化器。
+多机调度也可直接通过同仓库根目录的 [training_manager/](../training_manager) 进行任务排队与远程拉取。
+
+---
+
+## 回放驾驶、实时日志与验收评测
+
+### 1. Genesis 键盘驾驶与实时遥测
 
 ```powershell
-uv run --locked main.py train --config configs/v02_speed.toml --init-checkpoint outputs/v02_low/model_999.pt --forward-limit 1.0 --num-envs 1024 --iterations 600 --output outputs/v02_speed_1
+# 原生 Genesis 窗口键鼠驾驶（W/S 前后、A/D 转向、Z/X 连续腿高、Space 刹停、R 复位）
+# 倒地默认触发固件 RESCUE -> GETUP 自起并交还策略控制（加 --fall-reset 可恢复旧复位行为）
+uv run --locked main.py demo --checkpoint outputs/<run>/model_1200.pt --keyboard --speed 2.5
+
+# 全赛道自由驾驶
+uv run --locked main.py demo --checkpoint outputs/<run>/model_1200.pt --keyboard --free-drive
+
+# 指定地形与难度回放（支持 flat / slope / inv_slope / rough / bars / stairs / rough_slope / staggered_bars / single_side_bars_left|right / speed_bump）
+uv run --locked main.py demo --checkpoint outputs/<run>/model_1200.pt --surface single_side_bars_left --terrain-variant 3 --speed -0.55 --height 0.20 --viewer
+
+# 远程网页键鼠回放（配合 SSH -L 6007:127.0.0.1:6007）
+uv run --locked main.py demo --checkpoint outputs/<run>/model_1200.pt --live-port 6007 --keyboard
 ```
 
-`v02_speed` 保留 10% 的驻车回合。其余平地回合按 7% 常规随机、15% 直线启停与反向、7% 原地快转、13% 连续转弯、11% 入弯后制动、22% 松键再起步、25% 专项升降采样。速度工况在回合内保持腿高，初始腿高覆盖 17–33 cm。专项升降在静止或 ±0.50 m/s 匀速直行时交替升高、降低。按住时长从 0.26、0.70、1.70 s 中选择，零速指令保持 0.22、0.50 或 1.10 s 后再起步，同时采样同向连按与反向起步。快速转向请求上限为 ±4 rad/s。
+每次 `main.py demo` 默认将 env 0 的 50 Hz 遥测与跌倒事件记录到 `outputs/sim_logs/<timestamp>_<run>/`（`telemetry.csv`、`events.log`、`incidents/fall_XXX.html`、`summary.json`）；可用 `--sim-log DIR` 指定路径或 `--no-sim-log` 关闭。
 
-平地默认线速度档位为 0.8、1.2、1.6 m/s，超过当前速度上限的采样会截断。扩展高速档时，增加 `command_speed_levels` 并用 `--forward-limit` 设置对应上限。线加减速度上限按回合以 35%、45%、20% 的概率选 1、2、4 m/s²。偏航角加速度上限为 24 rad/s²，轮速和底盘摩擦圆会进一步限制组合指令。`v02_speed` 的高度参考限速 0.30 m/s、限加速度 0.90 m/s²。
-
-回放分别测启停与升降。TensorBoard 记录回合平均误差及 pitch、roll 峰值。
-
-### 从低腿高扩展到高腿高
-
-用低腿高权重或上一版高腿高权重初始化 17–33 cm 的平地训练。高腿高配置的四个腿部驱动仿真限矩均为 ±40 N·m，轮端限矩为 ±5 N·m。保留 ±0.5 m/s 线速度、±0.5 rad/s 偏航角速度和 0.30 m/s 的腿高参考变化上限。训练回合内继续切换高度。目标中 25% 为 17 cm，35% 为 20 cm，10% 为 33 cm，余下 30% 在整段高度连续采样。
+### 2. 自动化验收对比套件（`eval/`）
 
 ```powershell
-uv run --locked main.py train --config configs/v02_height_33.toml --init-checkpoint outputs/v02_low/model_999.pt --num-envs 1024 --iterations 600 --output outputs/v02_height_33_40nm
-uv run --locked main.py demo --checkpoint outputs/v02_height_33_40nm/model_599.pt --num-envs 1 --speed 0.35 --height-sequence 0.17 0.25 0.33 0.28 0.20 0.17 --height-hold 2
+# 平地升降、启停换向与低位恢复对比
+uv run --locked python -m eval.flat_height --config configs/archive/v02_sim2real_flat_height.toml --output outputs/flat_acceptance.csv CKPT_A CKPT_B
+
+# 单凸条过坎 -> 停稳 -> 倒车跟踪验收
+uv run --locked python -m eval.bump --checkpoint outputs/<run>/model_1200.pt --output outputs/bump_acceptance.csv
+
+# 曲面减速带（双轮 / 仅左轮 / 仅右轮）对比
+uv run --locked python -m eval.terrain_obstacle --output outputs/obstacle.csv --trace outputs/obstacle_trace.csv CKPT_A CKPT_B
+
+# 复杂地形全赛道通过率对比
+uv run --locked python -m eval.complex_terrain --output outputs/complex.csv CKPT_A CKPT_B
 ```
 
-回放同时检查行进升降、低位回归、高位保持和力矩饱和。也可用 `--height-sequence 0.17 0.33 0.17` 单独检查跨全行程的高度切换。
+> 兼容提示：旧的 `python -m tools.*_acceptance` 调用路径已通过薄壳保留，行为与 `eval.*` 完全一致。
 
-华南虎 V14 Rough-v1 的防劈叉项按车体系轮心前后差计罚，超过 5 cm 时追加固定惩罚。动作平滑项包括一阶和二阶动作差分以及关节速度和加速度，腿和轮分别计权。TensorBoard 的 `leg_fore_aft_gap_cm` 记录轮心相对同侧髋中心的前后投影差。
-
-### 华南虎贴地跑场
-
-用 [v02_scut_ground.toml](configs/v02_scut_ground.toml) 训练一个 policy。地形以华南虎 V14 Rough-v1 的跑场形状为参考，包含平地、凸坡、凹坡、随机粗糙面、交叉凸条、连续凸阶和两类凹阶。常规非平地从赛道两端出发直行，默认以 55%、30%、15% 的概率抽取三档难度，巡航速度请求为 0.52–0.80 m/s。当前阶段的地形均为贴地通过。
-
-平地占 40%，赛道约 24 m 长。平地回合中 10% 驻车，其余按 3% 随机指令、21% 直线加减速与换向、7% 原地转向、13% 行进转弯、20% 弯中制动、28% 反复启停、8% 升降采样。加减速度上限取 0.45、0.60、0.95 m/s²。平地接地时额外惩罚横滚误差和横滚角速度。
-
-普通交叉凸条占 20%，其中 60% 倒车通过。三档地形按 30%、45%、25% 采样，每回合从 0.50、0.60、0.70 m/s 抽一个巡航速度。粗糙坡道和错位凸条各占 7%，粗糙坡道的 75% 回合将腿高目标限制在 17–20 cm。左右单侧凸条各占 4%，每道凸条只覆盖一侧轮迹，每条赛道交替左右，训练速度为 0.40–0.60 m/s。其余回合仍覆盖 17–33 cm 连续腿高。
-
-`task.use_cad_base_hull` 从 CAD 车身外形生成底盘凸包，避免旧长方盒的空角刮坡触发重置。生成时沿用 CAD 关节树、质量和惯量。
+### 3. 导出实机部署 Bundle
 
 ```powershell
-uv run --locked main.py train --config configs/v02_scut_ground.toml --init-checkpoint outputs/v02_scut_ground_080_hjc_resume_20261123_054640/artifacts/model_2599.pt --backend cuda --num-envs 1536 --iterations 120 --output outputs/v02_scut_ground_080_std_cap --live-port 6015 --live-stream --live-fps 6
-uv run --locked main.py demo --checkpoint outputs/v02_scut_ground_080_std_cap/model_119.pt --surface single_side_bars_left --terrain-variant 3 --terrain-seed 101 --num-envs 1 --seconds 17 --speed -0.55 --height 0.20 --viewer
+python ../deploy/host/export_policy.py --checkpoint outputs/<run>/model_1200.pt
 ```
 
-当前地形强度为 `0.80`。短训从 `model_2599.pt` 初始化 actor 和 critic，并使用新优化器。熵系数为 `0.001`，每个动作的探索标准差上限为 `0.16`，TensorBoard 可查看 `Policy/max_noise_std`。回放逐地形按 1–3 档、两方向、17/20/33 cm 验证，确认确实穿过障碍，并记录倒地、pitch、roll、速度恢复和限矩。随机路面用不同种子复测，平地另外回归驻车、快转、升降和 1.6 m/s 启停。
-
-`--surface` 可选 `flat`、`slope`、`inv_slope`、`rough`、`bars`、`stairs`、`inv_stairs_low`、`inv_stairs_high`。启用复合地形后可选 `rough_slope` 和 `staggered_bars`，启用单侧凸条后可选 `single_side_bars_left` 和 `single_side_bars_right`。通过 `--terrain-variant` 选择难度，正负 `--speed` 检查两个方向。TensorBoard 的 `Episode/terrain_progress_m` 记录车体相对出生点的最大纵向位移。
-
-### 过坎恢复验收
-
-从 `training` 目录运行以下命令。默认以 0.8 m/s 接近高 4 cm、沿行进方向宽 12 cm 的凸条，
-腿高目标为 20 cm。获得实测障碍尺寸后可用 `--bar-height` 和 `--bar-width` 代入。
+### 4. TensorBoard 与 SCUT 参考模型
 
 ```powershell
-uv run --locked python -m tools.bump_acceptance --checkpoint outputs/v02_scut_ground_080_hjc_low_recovery_200_20261123/artifacts/model_199.pt --output outputs/bump_acceptance.csv
-```
-
-1. 6 s 内至少一个主轮与凸条接触，且两主轮轮心进入凸条后方并位于横向有效范围内。
-2. 越坎后发零速指令。2 s 内要求双轮承载、俯仰和横滚绝对值均不超过 8°，连续保持 0.24 s。
-   停车同样要求上述姿态和承载，并连续 0.24 s 满足实际纵向速度绝对值不超过 0.08 m/s。
-3. 发出默认 −0.5 m/s 的反向指令。2 s 内要求双轮承载、姿态回正、实际纵向速度为负且跟踪误差
-   不超过 0.15 m/s，连续保持 0.24 s。
-
-脚本输出各项达标的时间。超时项为 `null`。零速阶段超时后仍给反向指令，以便诊断，
-整体结果保留之前的失败。全部通过返回退出码 0，验收失败返回 1。可选 CSV 记录每拍的指令和车辆状态。
-
-### 曲面减速带与单边验收
-
-`python -m tools.terrain_obstacle_acceptance --output acceptance.csv --trace traces.csv CHECKPOINT_A CHECKPOINT_B`
-在同一 Genesis 场景比较多个模型。每个模型覆盖双轮、仅左轮和仅右轮三种接触工况，
-默认以 0.55 和 0.80 m/s 接近。两个单边工况使用镜像路面，并检查另一侧主轮是否接触凸起。
-通过后依次检查双轮承载、姿态回正、停稳和反向速度跟踪。逐帧数据按 50 Hz 输出。
-
-默认凸起尺寸为仿真工况的高 4 cm、沿行进方向长 30 cm。实测后用
-`--bump-height` 和 `--bump-length` 替换。默认轮速目标延迟 5 个物理步，即 10 ms。
-
-### 本机 sim2real 平地短训
-
-`configs/v02_sim2real_flat_height.toml` 从 20 cm 开始循环 `20 → 24 → 20 → 33 → 20 cm`。
-平地回合约 40% 用于升降、40% 用于启停和行驶、20% 从低位恢复姿态起步。
-腿部伺服沿用已有参数和 40 N·m 限幅。轮端限幅为 5 N·m，轮速目标延迟五个物理步（10 ms）。
-训练地点为平地。
-
-```powershell
-uv run --locked main.py train --config configs/v02_sim2real_flat_height.toml --init-checkpoint outputs/v02_scut_ground_080_hjc_low_recovery_200_20261123/artifacts/model_199.pt --num-envs 1024 --iterations 100 --output outputs/flat_height_trial --live-port 6016 --live-stream --live-fps 6
-uv run --locked python -m tools.flat_height_acceptance --config configs/v02_sim2real_flat_height.toml --output outputs/flat_height_trial/acceptance.csv outputs/v02_scut_ground_080_hjc_low_recovery_200_20261123/artifacts/model_199.pt outputs/flat_height_trial/model_99.pt
-```
-
-训练时打开 [本机监控](http://127.0.0.1:6016/)。平地验收对每个 checkpoint 执行相同的静态和双向行驶升降序列，
-检查启停换向、匀速时轮轴前后摆幅，以及四组低位恢复。可以用 `--wheel-torque` 或 `--wheel-delay-steps`
-对同一批 checkpoint 做轮端参数对照。
-
-## 旧平地 PPO 短训与回放
-
-```powershell
-uv run --locked main.py train --num-envs 256 --iterations 100 --output outputs/ppo_wheel_leg_v02_run1
-uv run --locked main.py demo --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --video outputs/ppo_v02_replay.mp4
-```
-
-平地 PPO 使用独立的策略和 critic 观测。Checkpoint 校验机器人型号和任务观测结构。
-
-## 从 checkpoint 继续训练
-
-```powershell
-uv run --locked main.py train --resume outputs/ppo_wheel_leg_v02_run1/model_99.pt --iterations 100 --live-port 6007 --live-fps 60
-```
-
-续训会恢复策略、critic 和优化器，使用 checkpoint 同目录的 `run_config.json` 还原任务、PPO 设置和启动参数。`--iterations` 指本次追加的轮数。上面的命令运行第 100 至 199 轮，生成 `model_199.pt`。仿真环境会重新初始化。续训的 checkpoint 和 TensorBoard 日志写入新的输出目录，TensorBoard 的迭代编号接续旧 checkpoint。旧 checkpoint 如果缺少配置快照，请用 `--robot`、`--num-envs` 和 `--config` 等参数指定原来的设置。
-
-## 实时训练监控
-
-在本机启动带监控的训练：
-
-```powershell
-uv run --locked main.py train --num-envs 64 --iterations 12 --live-port 6007
-```
-
-Genesis 自动打开，显示并行环境 0 的机器人和当前地形。跑道按地形分色，高差会加深台阶边缘。打开 [实时训练页](http://127.0.0.1:6007/) 查看同一台机器人的地形、速度、位移、车身离地高度和姿态，目标值与当前值并列显示。目标位移由本回合的速度和转向指令逐步推算。关闭 Genesis 窗口后，训练和网页监控继续运行。`--live-fps` 可调整窗口刷新率，默认 60 FPS。
-
-连续腿高任务用 `base_link` 原点到局部地面的垂向高度计算高度奖励，并记录 `Episode/body_height_mae_cm`。V0.2 的 0.17–0.33 m 髋到轮心指令对应约 0.0975–0.2575 m 的车身离地高度。回放可用 `--body-height 0.13` 或 `--body-height-sequence 0.13 0.22 0.13` 指定离地高度。`--height` 和 `--height-sequence` 使用髋到轮心口径。
-
-本地和远程监控页都提供训练轮次、采样速度、平均回合奖励、平均回合长度和两类 PPO 损失。曲线每轮更新，保留最近 300 轮，悬停可查看该轮数值。
-
-通过 SSH 使用 Windows 训练机时，在本机终端转发端口：
-
-```powershell
-ssh -t -L 6007:127.0.0.1:6007 hjcComputer powershell.exe -NoLogo -NoProfile
-```
-
-在远端的 `training` 目录里运行：
-
-```powershell
-uv run --locked main.py train --num-envs 64 --iterations 12 --live-port 6007 --live-stream
-```
-
-然后在本机浏览器打开 [实时训练页](http://127.0.0.1:6007/)。检测到 SSH 会话时，训练会自动采用网页串流。`--live-stream` 也可用于计划任务等无桌面的启动方式。画面由 MuJoCo 根据训练状态离屏绘制，默认目标为 8 FPS。关闭页面后渲染会暂停。训练进程退出时页面服务随之关闭。
-
-## Genesis 窗口驾驶
-
-```powershell
-uv run --locked main.py demo --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --keyboard --speed 2.5
-```
-
-在 Genesis 窗口中按住 `W/S` 前进或后退，按住 `A/D` 左转或右转。松键、按 `Space` 或切出窗口时，对应的运动指令归零。关闭窗口即可退出。原生键盘模式的前后目标速度默认上限为 2.5 m/s。实际速度取决于 checkpoint 的跟踪能力。
-
-搭配 `--live-port 6007 --live-telemetry` 可以在网页上查看数据，键盘输入由 Genesis 窗口接收。训练采样带有 PPO 探索噪声，回放使用策略的确定性动作。
-
-## 网页键鼠控制
-
-用相同的 SSH 端口转发，在远端 `training` 目录加载训练好的权重：
-
-```powershell
-uv run --locked main.py demo --robot v0.2 --checkpoint outputs/ppo_wheel_leg_v02_run1/model_99.pt --live-port 6007 --keyboard
-```
-
-打开 [机器人回放页](http://127.0.0.1:6007/)，点击机器人画面后操作。按住 `W/S` 前进或后退，按住 `A/D` 左转或右转，也可以按住页面上的方向按钮。松键释放对应方向，`Space` 将两个指令归零。浏览器失焦或控制连接断开时，运动指令会归零。拖动画面旋转视角，滚轮缩放，可以点击「复位视角」。训练监控页也可以调整视角。
-
-回放使用 checkpoint 的指令范围，`--speed` 给前后速度设置上限。连续腿高权重可配合 `--height` 或 `--height-sequence` 使用。键盘模式默认持续运行，按 `Ctrl+C` 结束，也可以用 `--seconds` 限定时间。
-
-网页回放的目标为 60 FPS，可用 `--live-fps` 调整。机器人画面标题旁显示渲染帧率。策略仍以 50 Hz 更新，画面在相邻状态之间插值，复位时直接切到新姿态。
-
-## 用 TensorBoard 查看完整曲线
-
-在本机另开一个终端，建立 6006 端口转发：
-
-```powershell
-ssh -t -L 6006:127.0.0.1:6006 hjcComputer powershell.exe -NoLogo -NoProfile
-```
-
-在远端 PowerShell 启动 TensorBoard：
-
-```powershell
-Set-Location 'D:\RL_Stuff\wheel_leg_rl_parallel\training'
 uv run --locked tensorboard --logdir outputs --host 127.0.0.1 --port 6006
-```
-
-在本机打开 [TensorBoard](http://127.0.0.1:6006/)，在 **Scalars** 中查看 `Train/mean_reward`、`Train/mean_episode_length` 和 `Loss/`。TensorBoard 可以读取已经结束的实验，也可以对比 `outputs` 内的多次训练。
-
-## 调参与实验记录
-
-用 `--config` 指定 TOML 覆盖项，未填写的项沿用 [configs/flat.toml](configs/flat.toml)。可以将以下内容保存为 `slow_flat.toml`，再运行 `uv run --locked main.py train --config slow_flat.toml`。
-
-```toml
-[task]
-forward_command = [-0.3, 0.3]
-
-[ppo.algorithm]
-learning_rate = 0.00005
-```
-
-华南虎 V14 Rough-v1 奖励的默认权重、尺度和阈值集中在 `task.scut_rough_reward` 下。要单独调整某个实验，把对应小节和参数写进该实验的 TOML。下例将 `v02_speed` 的地面俯仰二次惩罚权重从 `2.0` 调到 `3.0`。 [默认配置](configs/flat.toml)
-
-```toml
-[task.scut_rough_reward.tracking]
-pitch_penalty_weight = 3.0
-```
-
-每次训练在输出目录中生成 `run_config.json`。其中包含合并后的任务与 PPO 配置，以及实际使用的机器人型号、MJCF 路径与哈希、种子、环境数、迭代数和仿真步长。省略 `--output` 时自动创建带时间戳的目录。手动指定时使用新目录或空目录，每次运行独立保存。
-
-回放时默认使用 checkpoint 同目录的 `run_config.json`。可用 `--config` 显式指定 TOML 或 JSON 快照。复跑某次训练时，用 `--config` 读取当前格式的快照，并按 `run` 字段填写机器人、模型、种子、环境数和迭代数等启动参数。包含已删除 reward 配置的旧快照需要在原版本运行。
-
-## 华南理工参考模型
-
-```powershell
 uv run --locked main.py demo --robot scut
-uv run --locked convert_wheelbipe.py
+uv run --locked python -m scripts.convert_wheelbipe
 ```
-
-转换脚本默认读取同一工作区内 `Ref_Git/wheeled-legged_RL` 的原版 USD。`--usd` 可以指定其他路径下的同一资产，`--output` 可以指定输出位置。资产的授权见 [SCUTRobotLab-LICENSE.txt](assets/SCUTRobotLab-LICENSE.txt)。
-
-
-## Demo run log (sim log)
-
-Every `main.py demo` run (including `--keyboard`) automatically records env 0 to
-`outputs/sim_logs/<timestamp>_<run>/`; use `--sim-log DIR` to choose the folder or `--no-sim-log` to disable it.
-
-- `telemetry.csv`: one row per 50 Hz control step: key input, target/sloped commands, pose, body velocities,
-  leg/wheel joint states and torques, policy actions, wheel/body contact forces, saturation flags, chassis mode
-  (NORMAL / RESCUE / GETUP) and the real-time factor.
-- `events.log`: timeline of key presses, mode switches, resets and warnings (leg/wheel torque saturation, wheel
-  lift-off, large pitch/roll, speed/yaw tracking errors, body contact, slow simulation). Each fall lists why the
-  env flagged it and a heuristic list of likely causes from the preceding seconds.
-- `incidents/fall_XXX.csv` + `fall_XXX.html`: 3 s before to 1 s after each fall; open the HTML offline for charts.
-- `meta.json` / `summary.json`: run options, torque limits and event counts.

@@ -9,7 +9,7 @@ from robots.scut_rough_reward import BrakingPitchCost
 class LandingBrakeTest(unittest.TestCase):
     def setUp(self):
         self.dt = 0.02
-        self.settings = load_config(TRAINING_DIR / 'configs/v02_landing_brake_control.toml')[
+        self.settings = load_config(TRAINING_DIR / 'configs/archive/v02_landing_brake_control.toml')[
             'task']['scut_rough_reward']['braking']
         self.cost = BrakingPitchCost(torch.zeros((1, 3)), self.settings, self.dt)
 

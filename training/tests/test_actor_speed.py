@@ -10,8 +10,8 @@ from main import add_actor_speed_input
 
 class ActorSpeedTest(unittest.TestCase):
     def test_matched_configs_only_change_actor_observation(self):
-        control = load_config(TRAINING_DIR / 'configs/v02_landing_brake_control.toml')
-        treatment = load_config(TRAINING_DIR / 'configs/v02_landing_brake_true_speed.toml')
+        control = load_config(TRAINING_DIR / 'configs/archive/v02_landing_brake_control.toml')
+        treatment = load_config(TRAINING_DIR / 'configs/archive/v02_landing_brake_true_speed.toml')
         self.assertFalse(control['task']['locomotion'].pop('actor_true_forward_speed'))
         self.assertTrue(treatment['task']['locomotion'].pop('actor_true_forward_speed'))
         self.assertEqual(control, treatment)

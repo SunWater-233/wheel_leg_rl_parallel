@@ -9,7 +9,7 @@ from robots.wheel_leg_locomotion import WheelLegLocomotionEnv
 
 class FlatHeightCurriculumTest(unittest.TestCase):
     def test_flat_training_keeps_joint_limits_and_uses_wheel_delay(self):
-        settings = load_config(TRAINING_DIR / "configs/v02_sim2real_flat_height.toml")["task"]["locomotion"]
+        settings = load_config(TRAINING_DIR / "configs/archive/v02_sim2real_flat_height.toml")["task"]["locomotion"]
         self.assertEqual(settings["terrain"], "plane")
         self.assertEqual(settings["leg_torque_limit"], 40.0)
         self.assertEqual(settings["wheel_target_delay_steps"], 5)
